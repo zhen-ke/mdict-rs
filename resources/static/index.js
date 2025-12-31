@@ -315,15 +315,39 @@ function escapeRegExp(string) {
 $(document).on('click', '#share-btn', function(e) {
     e.preventDefault();
     const url = window.location.href;
+    const $btn = $(this);
+    const originalText = $btn.html();
 
-    navigator.clipboard.writeText(url).then(() => {
-        const $btn = $(this);
-        const originalText = $btn.html();
+    // 复制到剪贴板 (兼容 HTTP)
+    function copyToClipboard(text) {
+        // 方法1: 现代 Clipboard API (仅 HTTPS)
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            return navigator.clipboard.writeText(text);
+        }
+
+        // 方法2: 降级方案 - 使用临时 textarea
+        return new Promise((resolve, reject) => {
+            try {
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.style.position = 'fixed';
+                textarea.style.opacity = '0';
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+                resolve();
+            } catch (err) {
+                reject(err);
+            }
+        });
+    }
+
+    copyToClipboard(url).then(() => {
         $btn.html('✅ 已复制');
         setTimeout(() => $btn.html(originalText), 2000);
     }).catch(err => {
         console.error('复制链接失败:', err);
-        // 降级方案：显示链接让用户手动复制
         prompt('复制此链接分享:', url);
     });
 });

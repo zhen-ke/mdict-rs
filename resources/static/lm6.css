@@ -71,7 +71,7 @@ word {display:none}
     display: inline-block;
 }
 .colloc.key{color:blue}
-.colloc {color: #003472;font-weight:bold} /*colloc box 内的词头*/
+.colloc {color: #8299ae;font-weight:bold} /*colloc box 内的词头*/
 .collocate,.exponent{display:block;margin-top:5px}
 .collocate.inline{display:inline}
 .collocations .colloc{display:inline-block;font-weight:bold;margin-left:-2px}
@@ -127,7 +127,7 @@ color:#778899;
     hsla(224, 22%, 50%, 0) 95%
   );
 }
-.expandable .exp{color:#003472;font-weight:bold} /*未知*/
+.expandable .exp{color:#8299ae;font-weight:bold} /*未知*/
 .expandable{cursor:pointer}
 .expl{display:block;padding:0 3px}
 .expr{font-weight:bold}
@@ -152,7 +152,7 @@ color:#778899;
 span.sensenum + .gram {margin-left:0px}
 .lexunit + .gram {margin-left:0px}
 .gram:first-child {margin-left:0px}
-.grambox .expl,.grambox .compareword{background-color:#f3faff;display:block;padding-left:3px}
+.grambox .expl,.grambox .compareword{display:block;padding-left:3px}
 .grambox .heading.newline{background-color:#6cd0f6}
 .grambox{background-color:#bee4f8;border-color:#bee4f8}
 .grambox expcn {margin-left: 9px}
@@ -196,10 +196,10 @@ span.sensenum + .gram {margin-left:0px}
 .pastpart{font-size:1.0em;font-weight:bold;color:#1d2a57} /*过去式*/
 .pasttense{font-size:1.0em;font-weight:bold;color:#1d2a57} /*过去分词*/
 .phrase{display:block}
-.phrasetext{color: #003472;font-weight:bold} /*未知*/
+.phrasetext{color: #8299ae;font-weight:bold} /*未知*/
 .menuitem .phrv{color: #1d2a57;font-weight:bold;font-size: 1em;} /*词头下方折叠块entry menu*/
 .phrvbentry{display:block;margin-top:10px;margin-left:10px}
-.phrvbhwd{font-weight:bold;color:#003472;margin-right:4px} /*动词短语 phrasal verb*/
+.phrvbhwd{font-weight:bold;color:#8299ae;margin-right:4px} /*动词短语 phrasal verb*/
 .phrvbs .heading{display:block;color:#1685a9;font-weight:bold}
 .phrvbs{display:block;margin-top:10px;margin-left:6px}
 .pluralform{font-weight:bold}
@@ -284,10 +284,10 @@ span.sensenum + .gram {margin-left:0px}
 .verbtable td.col1{font-weight:bold}
 .verbtable td.col2{font-style:italic}
 .verbtable td{color: #1d2a57;padding:0 5px 0 2px;border-style:solid;border-width:1px;border-color:#d2d2d2}
-.w{color: #003472;font-weight:bold}
+.w{color: #8299ae;font-weight:bold}
 .ws-head.ref{display:block;margin-top:10px}
 .ws-head{font-weight:bold;color:#1c3a8b;font-size:larger}
-.wswd{color: #003472;font-weight:bold;display:block}
+.wswd{color: #8299ae;font-weight:bold;display:block}
 a:hover{text-decoration:underline}
 a{color:#36f;text-decoration:none}
 COLLOC{font-size:0.9em;margin-left:6px}
