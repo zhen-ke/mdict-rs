@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <meta name="description" content="MDX 极速词典 - Rust + Sled 驱动，极致轻量高效"/>
+    <meta name="theme-color" content="#0f172a"/>
+    <link rel="preconnect" href="https://fonts.googleapis.com"/>
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet"/>
+    <script src="jquery.min.js"></script>
+    <script src="index.js"></script>
+    <link rel="stylesheet" type="text/css" href="index.css"/>
+    <link rel="stylesheet" type="text/css" href="lm6.css"/>
+    <title>MDX 极速词典</title>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">
+                <div class="logo-icon">📖</div>
+                <h1>MDX 极速词典</h1>
+            </div>
+            <p class="subtitle">由 Rust + Sled 驱动，极致轻量高效</p>
+        </header>
+
+        <div class="search-container">
+            <div class="search-box" id="search-wrapper">
+                <input
+                    type="text"
+                    id="word"
+                    name="word"
+                    class="search-input"
+                    placeholder="输入要查询的单词..."
+                    autocomplete="off"
+                />
+                <button id="lucky-btn" class="search-btn">查询</button>
+                <ul id="suggestions"></ul>
+            </div>
+            <p class="hint">按 <kbd>Enter</kbd> 快速查询 · <kbd>Ctrl+L</kbd> 清空</p>
+        </div>
+
+        <div class="result-card">
+            <div class="result-header">
+                <div class="result-icon">📝</div>
+                <span class="result-title">查询结果</span>
+            </div>
+            <div id="mdx-resp" class="lm6">
+                <div class="empty-state">
+                    <div class="empty-state-icon">🔍</div>
+                    <p>请在上方输入单词开始查询</p>
+                </div>
+            </div>
+        </div>
+
+        <footer>
+            <p>Powered by <span>Rust</span> · 内存占用 &lt; 50MB · Author ➣ zhi.moe</p>
+        </footer>
+    </div>
+</body>
+</html>

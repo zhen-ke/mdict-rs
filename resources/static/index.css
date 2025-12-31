@@ -1,0 +1,385 @@
+/* MDX 极速词典 - 暗色主题 */
+
+:root {
+    --primary: #6366f1;
+    --primary-dark: #4f46e5;
+    --bg: #0f172a;
+    --bg-card: #1e293b;
+    --bg-input: #334155;
+    --text: #f1f5f9;
+    --text-muted: #94a3b8;
+    --border: #475569;
+    --accent: #22d3ee;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    line-height: 1.6;
+}
+
+.container {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 40px 20px;
+}
+
+/* Header */
+header {
+    text-align: center;
+    margin-bottom: 40px;
+}
+
+.logo {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.logo-icon {
+    width: 48px;
+    height: 48px;
+    background: linear-gradient(135deg, var(--primary), var(--accent));
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+}
+
+h1 {
+    font-size: 2rem;
+    font-weight: 600;
+    background: linear-gradient(135deg, var(--text), var(--accent));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.subtitle {
+    color: var(--text-muted);
+    font-size: 0.95rem;
+}
+
+/* Search Box */
+.search-container {
+    position: relative;
+    margin-bottom: 32px;
+}
+
+.search-box {
+    display: flex;
+    gap: 12px;
+    background: var(--bg-card);
+    padding: 8px;
+    border-radius: 16px;
+    border: 1px solid var(--border);
+    box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+    transition: border-color 0.2s, box-shadow 0.2s;
+    position: relative;
+    flex-wrap: wrap;
+}
+
+.search-box:focus-within {
+    border-color: var(--primary);
+    box-shadow: 0 4px 24px rgba(99, 102, 241, 0.2);
+}
+
+.search-input {
+    flex: 1;
+    min-width: 200px;
+    background: var(--bg-input);
+    border: none;
+    padding: 16px 20px;
+    font-size: 1.1rem;
+    color: var(--text);
+    border-radius: 10px;
+    outline: none;
+    font-family: inherit;
+}
+
+.search-input::placeholder {
+    color: var(--text-muted);
+}
+
+.search-btn {
+    background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+    color: white;
+    border: none;
+    padding: 16px 32px;
+    font-size: 1rem;
+    font-weight: 500;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: transform 0.15s, box-shadow 0.15s;
+    font-family: inherit;
+}
+
+.search-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(99, 102, 241, 0.4);
+}
+
+.search-btn:active {
+    transform: translateY(0);
+}
+
+/* Keyboard hint */
+.hint {
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    margin-top: 12px;
+}
+
+kbd {
+    background: var(--bg-input);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    border: 1px solid var(--border);
+}
+
+/* Suggestions Dropdown */
+#suggestions {
+    position: absolute;
+    top: 100%;
+    left: 8px;
+    right: 8px;
+    margin: 8px 0 0 0;
+    padding: 8px 0;
+    list-style: none;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    max-height: 300px;
+    overflow-y: auto;
+    z-index: 1000;
+    display: none;
+}
+
+#suggestions li {
+    padding: 12px 20px;
+    cursor: pointer;
+    font-size: 0.95rem;
+    color: var(--text);
+    transition: background 0.15s, color 0.15s;
+    border-left: 3px solid transparent;
+}
+
+#suggestions li:hover,
+#suggestions li.selected {
+    background: var(--bg-input);
+    color: var(--accent);
+    border-left-color: var(--primary);
+}
+
+/* Custom Scrollbar */
+#suggestions::-webkit-scrollbar {
+    width: 6px;
+}
+
+#suggestions::-webkit-scrollbar-track {
+    background: var(--bg-card);
+}
+
+#suggestions::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 3px;
+}
+
+/* Result Card */
+.result-card {
+    background: var(--bg-card);
+    border-radius: 16px;
+    border: 1px solid var(--border);
+    overflow: hidden;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.2);
+}
+
+.result-header {
+    background: linear-gradient(135deg, var(--bg-input), var(--bg-card));
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.result-icon {
+    width: 32px;
+    height: 32px;
+    background: var(--primary);
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+}
+
+.result-title {
+    font-weight: 500;
+    color: var(--text);
+}
+
+#mdx-resp {
+    padding: 24px;
+    min-height: 200px;
+    font-size: 1rem;
+    line-height: 1.8;
+}
+
+/* Empty state */
+.empty-state {
+    text-align: center;
+    color: var(--text-muted);
+    padding: 40px 20px;
+}
+
+.empty-state-icon {
+    font-size: 48px;
+    margin-bottom: 16px;
+    opacity: 0.5;
+}
+
+/* Footer */
+footer {
+    text-align: center;
+    margin-top: 40px;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+}
+
+footer span {
+    color: var(--primary);
+}
+
+/* Responsive */
+@media (max-width: 600px) {
+    .search-box {
+        flex-direction: column;
+    }
+    .search-btn {
+        width: 100%;
+    }
+    h1 { font-size: 1.5rem; }
+    .container {
+        padding: 20px 15px;
+    }
+}
+
+/* =============================================
+   Dictionary Content Styles (Dark Theme)
+   ============================================= */
+
+/* Override lm6.css styles for dark theme */
+#mdx-resp .entry {
+    color: var(--text);
+}
+
+#mdx-resp .hyphenation {
+    color: var(--accent);
+}
+
+#mdx-resp .pron {
+    color: #7dd3fc;
+}
+
+#mdx-resp .pos {
+    color: #a78bfa;
+}
+
+#mdx-resp .sensenum {
+    color: #f87171;
+}
+
+#mdx-resp .def {
+    color: var(--text);
+}
+
+#mdx-resp .defcn {
+    color: #67e8f9;
+}
+
+#mdx-resp .example {
+    color: var(--text-muted);
+}
+
+#mdx-resp .example exaen {
+    color: #38bdf8;
+}
+
+#mdx-resp .gram {
+    color: #fb923c;
+}
+
+#mdx-resp .etymsense {
+    color: #34d399;
+}
+
+#mdx-resp .colloc {
+    color: #60a5fa;
+}
+
+#mdx-resp .lexunit {
+    color: #818cf8;
+}
+
+#mdx-resp .registerlab {
+    color: #f472b6;
+}
+
+#mdx-resp .heading {
+    color: var(--text);
+    background: var(--bg-input);
+}
+
+#mdx-resp .collobox,
+#mdx-resp .thesbox,
+#mdx-resp .usagebox,
+#mdx-resp .grambox,
+#mdx-resp .f2nbox {
+    background: var(--bg-input);
+    border-color: var(--border);
+}
+
+#mdx-resp .section {
+    background: var(--bg-card);
+}
+
+#mdx-resp a {
+    color: var(--primary);
+}
+
+#mdx-resp a:hover {
+    color: var(--accent);
+}
+
+/* Verb tables */
+#mdx-resp .verbtable td {
+    color: var(--text);
+    border-color: var(--border);
+}
+
+/* Links and cross-references */
+#mdx-resp .syn,
+#mdx-resp .opp,
+#mdx-resp .relatedwd,
+#mdx-resp .reflex {
+    color: #7dd3fc;
+}
+
+/* Speaker icons */
+#mdx-resp img[src*="spkr"] {
+    filter: brightness(1.5);
+}

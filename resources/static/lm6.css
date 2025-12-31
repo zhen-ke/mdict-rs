@@ -1,0 +1,465 @@
+body{font-size: 1.2em;}
+@font-face {
+  font-style:normal;
+  font-weight:400;
+}
+@font-face {
+  font-style:normal;
+  font-weight:700;
+}
+@font-face {
+  font-style:italic;
+  font-weight:500;
+}
+@font-face {
+  font-style:normal;
+  font-weight:500;
+}
+@font-face {
+  font-style:italic;
+  font-weight:700;
+}
+@font-face {
+  font-style:normal;
+  font-weight:900;
+}
+@font-face {
+}
+@font-face{
+}
+word {display:none}
+*{word-wrap:break-word !important}
+.abbr{font-weight:bold}
+.ac,.ac{padding-left:2px;padding-right:2px;border-radius:2px 2px 2px 2px;border-style:solid;border-width:1px;font-variant:small-caps;font-size:0.8em;font-weight:bold;color:#4169E1;margin-right:4px}
+.add_exa{font-style:italic;display:block}
+.amequiv{color:#6dbdff;font-weight:bold} /*英美式*/
+.amequiv::before {content: "►";margin-right:-8px;margin-left:10px}
+.arrow{color:#333;border:1px solid #666;border-radius:2px;font-size:smaller}
+.at-link{border:1px solid #e4e4e4;border-radius:6px;padding:.1em .5em;margin:.5em 0;background-color:rgb(255, 251, 241)}
+.at-link{display:none}
+.badcollo{text-decoration:line-through}
+.badexa{text-decoration:line-through;font-style:italic}
+.brequiv{color: #6dbdff;font-weight:bold} /*英美式*/
+.brequiv::before {content: "►";margin-right:-8px;margin-left:10px}
+.buttons{display:block}
+.chwd{margin-top:0.6em;float: right;}
+.chwd a{ /*词性导航*/
+  display:inline;
+  border:1px solid #1d2a57;
+  border-radius:2px;
+  color:#1d2a57;
+  padding-top:0em;
+  padding-bottom:0em;
+  padding-left:0.2em;
+  padding-right:0.2em;
+  margin-bottom:0px;
+  font-size:1em;
+  font-weight:normal;
+  }
+.chwd .hw{color:white}
+.colloexa .collo{color:#333;font-weight:bold} /*黑色名词搭配*/
+.colloexa .collo, .propform, .propformprep{margin-left:17px;}
+.collobox .section{background-color:#f3faff}
+.collobox,.thesbox,.usagebox,.grambox,.f2nbox{border-radius:4px 4px 4px 4px;border-style:solid;border-width:2px;display:block;margin-bottom:0.5em;clear:both;margin-top:0.5em}
+.collobox{background-color:#bee4f8;border-color:#bee4f8;}/*collobox框头背景*/
+.collobox expcn {margin-left: 0px}
+.collobox .example::before {
+    content: "•";
+    color: #808080;
+    font-size: 1em;
+    margin-right: 0px;
+    display: inline-block;
+}
+.colloc.key{color:blue}
+.colloc {color: #003472;font-weight:bold} /*colloc box 内的词头*/
+.collocate,.exponent{display:block;margin-top:5px}
+.collocate.inline{display:inline}
+.collocations .colloc{display:inline-block;font-weight:bold;margin-left:-2px}
+.collocations .last{margin-bottom:20px}
+.colloexa{display:block}
+.colloinexa{font-weight:bold;color:#fc5d5d}
+.comp{font-weight:bold}
+.compareword{padding-top:5px;padding-bottom:5px}
+.cross{color:red;font-weight:bold}
+.cyan{color:#00a2e8;font-size:larger}
+.defbold{font-weight:bold}
+.deriv{font-weight:bold;color: #1d2a57} /*最下方其他词性的形式转换*/
+.dict-faq img[src*="cover"]{max-height:8em}
+.entry div.content{display:none;margin-bottom:10px}
+.entry,.entry.lozenge,.verbtable{margin-top:.5em}
+.entry{line-height:150%;display:block;color:#333}
+.errorbox{display:block}
+.exp.display{font-weight:700}
+.etymbox{margin-top:1em;display:block}
+.etymology{margin-top:10px}
+.etymology b{color: #f09894}
+.etymorigin{font-style:italic}
+.etymrefhom{font-size:0.8em;vertical-align:super;font-style:normal}
+.etymrefhwd{font-style:italic}
+.etymsense{color: #5eaaa6;display:block} /*词源*/
+.etymtran{font-weight:bold}
+.example{font-size:0.9em;display:block;color:#808080;margin-left:0.5px;margin-top:2px;margin-bottom: 4px;}
+.example tj{ /*例句*/
+font-size:0.85em;
+margin-left:6px;
+font-style:normal;
+color:#778899;
+}
+.last tj{font-size:0.9em}
+.lm6 {
+  --hw: hsl(224, 68%, 36%);
+  --darkred: darkred;
+  --black: #222;
+  --white: white;
+  --gray: #808080;
+  --btn-blue: #045fb4;
+  --gray-blue: hsl(221, 37%, 56%);
+  --head-red: hsla(358, 81%, 43%, 0.8);
+  --teal: teal;
+  --orange: hsl(17, 50%, 50%);
+  --linear: linear-gradient(
+    to bottom,
+    hsla(224, 22%, 50%, 0) 5%,
+    hsla(224, 22%, 50%, 0.25) 10%,
+    hsla(224, 22%, 50%, 0.15) 30%,
+    hsla(224, 22%, 50%, 0.15) 70%,
+    hsla(224, 22%, 50%, 0.25) 90%,
+    hsla(224, 22%, 50%, 0) 95%
+  );
+}
+.expandable .exp{color:#003472;font-weight:bold} /*未知*/
+.expandable{cursor:pointer}
+.expl{display:block;padding:0 3px}
+.expr{font-weight:bold}
+.f2nbox .heading{color:#00a2e8}
+.f2nbox{border-color:#00a2e8}
+.f2nbox .example{margin-left: 0;}
+.f2nbox .example::before {
+    content: "•";
+    color: #808080;
+    font-size: 1em;
+    margin-right: 0px;
+    display: inline-block;
+}
+.f2nbox expcn {margin-left: 9px}
+.freq,.freq{display: inline;padding-left:2px;padding-right:2px;border-radius:2px 2px 2px 2px;border-style:solid;border-width:1px;font-variant:small-caps;font-size:0.8em;font-weight:bold;color:#4169E1;margin-left:0px;margin-right:4px}
+.frequent{color:red}
+.fullform{font-weight:bold}
+.geo,span.geo{font-size:0.95em;font-weight:normal;font-style:italic;color:#7558ae} /*英美式标注*/
+.gloss,.collgloss{font-weight:normal;font-style:normal;color:#369}
+.goodcollo{font-weight:bold}
+.gram{font-weight:400;font-size:1em;color:#e57d34;margin-left: 4px;margin-right:0px} /*橙色用法，及物动词等*/
+span.sensenum + .gram {margin-left:0px}
+.lexunit + .gram {margin-left:0px}
+.gram:first-child {margin-left:0px}
+.grambox .expl,.grambox .compareword{background-color:#f3faff;display:block;padding-left:3px}
+.grambox .heading.newline{background-color:#6cd0f6}
+.grambox{background-color:#bee4f8;border-color:#bee4f8}
+.grambox expcn {margin-left: 9px}
+.grambox .example::before {
+    content: "•";
+    color: #808080;
+    font-size: 1em;
+    margin-right: 0px;
+    display: inline-block;
+}
+.grammar{display:block}
+.gramrefcont{display:block;text-transform:lowercase;font-variant:small-caps;padding-left:3px;padding-bottom:1px}
+.group .pos{font-weight:bold;display:block}
+.group,.w{display:block}
+.group{margin-top:10px}
+.header{font-weight:bold;font-variant:small-caps}
+.heading.newline{display:block;}
+.heading{color:white;font-weight:bold;font-size: 14px;margin-left: 3px;}/*box知识框框头*/
+.hint .expl{display:inline}
+.hintbold{font-weight:bold}
+.hintitalic{font-style:italic;font-size:0.95em}
+.homnum{display: inline-block;padding-left:2px;vertical-align:super;font-size:10pt;color:#1d2a57;font-weight:bold;margin-left:1px} /*词头上标数字*/
+/*.hs0:before{}*/
+.hwd{display:none}
+.hyphenation{display: inline-block;font-weight:bold;font-size:1.6em;color:#1d2a57;margin-right:2px;} /*词头*/
+.imgholder img{max-height:4em}
+.imgholder{cursor:pointer;display:block;margin-bottom:1ex;padding:2px;clear:both;float: right}
+.item{display:block}
+.last{border-bottom-left-radius:9px;border-bottom-right-radius:9px}
+.level{color:#4169E1;font-size:1em;margin-right:4px;margin-left:4px}
+.lexunit{font-weight:bold;color: #4d89d2;margin-right: 4px;} /*释义前浅蓝搭配，颜色#4d89d2*/
+.lexvar{font-weight:bold}
+.linkword{font-style:italic}
+.menuitem .signpost{background-color:transparent;color:black;margin-left:0;/* font-size:0.9em; */}
+.menuitem{display:block}
+.nodeword{color:rgba(51, 102, 153, 0.8);font-weight:bold}
+.no-sound img{border:1px solid gray;border-radius:3px;max-height:.9em}
+.opp{font-weight:bold;color:#6dbdff}
+.opp::before {content: "►";margin-right:-8px;margin-left:10px}
+.orthvar{font-weight:bold}
+.pastpart{font-size:1.0em;font-weight:bold;color:#1d2a57} /*过去式*/
+.pasttense{font-size:1.0em;font-weight:bold;color:#1d2a57} /*过去分词*/
+.phrase{display:block}
+.phrasetext{color: #003472;font-weight:bold} /*未知*/
+.menuitem .phrv{color: #1d2a57;font-weight:bold;font-size: 1em;} /*词头下方折叠块entry menu*/
+.phrvbentry{display:block;margin-top:10px;margin-left:10px}
+.phrvbhwd{font-weight:bold;color:#003472;margin-right:4px} /*动词短语 phrasal verb*/
+.phrvbs .heading{display:block;color:#1685a9;font-weight:bold}
+.phrvbs{display:block;margin-top:10px;margin-left:6px}
+.pluralform{font-weight:bold}
+.popheader.popcollo{background-color:#b9d7e8}
+.popheader.pope_menu{background-color:#84cadf}
+.popheader.popetym{background-color:#a4d3c9}
+.popheader.popexa{background-color:rgb(191, 206, 229)}
+.popheader.popphrase{background-color:#a3b4df}
+.popheader.popthes{background-color:#b9d7e8}
+.popheader.popwf{background-color:#fac694}
+.popheader{display:block;color:white;font-weight:bold;padding-left:3px;font-size: 14px;}
+.popup-button:hover{cursor:pointer}
+.popup-button{
+    font-weight:500;
+    border-radius:2px;
+    border: 1px solid #7e92c7;
+    background-color:#f0f2fc;
+    color: #698aab  /*#733C12*/;
+    font-size: 90%;
+    padding: 0px 2px 0px 2px;
+    display: inline-block;
+    line-height: 120%;
+    margin-right: 2px;
+    font-variant: all-small-caps;
+    margin-bottom: 3px;
+    margin-top:3px;
+}
+.popup-button{user-select:none}
+.popup-button-hover{background-color:#dfe3f8;cursor:pointer}
+.popverbs{display:block;color:white;font-weight:bold;background-color:#feb6b9;padding-left:3px;margin-bottom:5px;font-size: 14px;}
+.pos{display: inline-block;font-size:0.95em;font-style:italic;color:#06aeb7;font-weight:500;margin-left:4px;margin-right:0px} /*词性*/
+.prespart{font-size:1.0em;font-weight:bold;color:#1d2a57} /*现在分词*/
+.pronstrong{font-style:italic}
+.propform{font-weight:bold;display:block;color:#00397f} /*深蓝搭配*/
+.propformprep{font-weight:bold;display:block;color:#4d89d2} /*释义下浅蓝搭配#4d89d2*/
+.ptandpp{font-weight:bold;color:#1d2a57;margin-left:-4px} /*未知*/
+.refhomnum{vertical-align:super;font-size:60%}
+.refhwd,.refsensenum{font-style:normal;font-variant:small-caps;text-transform:lowercase}
+.reflex{color: #6dbdff;font-weight:bold} /*释义最下同义词跳转*/
+.refsensenum{font-size:0.8em}
+.registerlab{color:#ff69b4;font-weight:bold;margin-right:4px;margin-left:4px} /*正式小粉*/
+.registerlab + .registerlab {margin-left:-4px}
+.registerlab:first-child {margin-left:0px}
+.relatedwd{color:#6dbdff;font-weight:bold;margin-left:10px} /*释义末尾相关词汇*/
+.runon{display:block;margin-top:8px}
+.secheading,.subheading{font-variant:normal;text-transform:uppercase}
+.secheading.no_convert{text-transform:none}
+.section{display:block;padding:0 3px}
+.sense{display:block}
+.signpost{border-radius:2px;color:white;background-color:#647fb8;margin-left:0em;margin-right:2px;font-weight:bold;font-variant:small-caps;text-transform:uppercase;font-size:0.8em;padding-left:3px;padding-right:3px;border-radius:2px 2px 2px 2px} /*释义前浅蓝框*/
+.spokensect{border-top:solid;border-bottom:solid;border-width:2px;display:block;margin-bottom:1ex;clear:both;margin-top:1ex;border-color:#00a2e8;padding:3px}
+.spokensecthead{display:block;color:#00a2e8;font-weight:bold}
+.str{font-size:large;font-weight:bold}
+.subheading,.secheading{display:block;font-weight:bold;color:white;background-color:#cbeafb;margin-left:-3px;margin-right:-3px;font-variant:small-caps;padding-left:3px;font-size: 14px;}
+.subsense{display:block}
+.superl{font-weight:bold}
+.syn{font-weight:bold;color:#6dbdff}
+.syn::before{content: "►";margin-right:-8px;margin-left:10px}
+.t3perssing{
+    font-size:1.05em;
+    font-weight: bold;
+    color: #1d2a57}
+.thesaurus .secheading,.thesbox .secheading{background-color:#a186bd}
+.thesaurus .section,.collocations .section{margin-bottom:10px}
+.thesaurus .sense{padding-left:3px;padding-right:3px;margin-top:0}
+.thesbox .section{background-color:#f3faff}
+.thesbox{background-color:#bee4f8;border-color:#bee4f8}
+.collobox expcn {margin-left: 0px}
+.thespropform{font-weight:bold}
+.thesref .refhwd,.thesref .refhomnum{color:#6dbdff;font-weight:bold}
+.thesref span.thesaurus{color:#6dbdff;font-variant:small-caps} /*► thesaurus*/
+.thesref{display:inline} /*► see thesaurus at…*/
+.thesref.newline{display:block;font-size: 5em;}
+.expl tj{font-size:0.9em}
+.usagebox .expl{background-color:#f3faff}
+.usagebox{background-color:#00a2e8;border-color:#00a2e8}
+.verbtable .aux{font-weight:bold}
+.verbtable .geo{font-style:italic;color: #7558ae;font-size:0.95em;font-weight:normal} /*英美式标注*/
+.verbtable .lemma{color:#8fc2e1;font-size:120%;font-weight:bold}
+.verbtable .verb_form{color:#8fc2e1;font-weight:bold}
+.verbtable table{border-collapse:separate;border-spacing:1px;margin-top:10px}
+.verbtable td.col1{font-weight:bold}
+.verbtable td.col2{font-style:italic}
+.verbtable td{color: #1d2a57;padding:0 5px 0 2px;border-style:solid;border-width:1px;border-color:#d2d2d2}
+.w{color: #003472;font-weight:bold}
+.ws-head.ref{display:block;margin-top:10px}
+.ws-head{font-weight:bold;color:#1c3a8b;font-size:larger}
+.wswd{color: #003472;font-weight:bold;display:block}
+a:hover{text-decoration:underline}
+a{color:#36f;text-decoration:none}
+COLLOC{font-size:0.9em;margin-left:6px}
+COLLOCEN{}
+.collo COLLOT{font-size:0.85em;margin-left:6px}
+COLLOTEN{}
+EN{
+font-weight:500;
+font-size:1em;
+color:#2b2b2b;
+}
+Error{margin-left:6px}
+ErrorEN{}
+.example exaen{
+  font-weight:400;
+color:#1685a9;
+}
+.example EXAMPLE{
+margin-left:6px;
+font-style:normal;
+font-size:0.85em;
+color:#778899;
+}
+F2N{color: #007a6c !important;
+background: rgba(0, 122, 108, .2);
+border-radius: 3px;font-size:0.9em;margin-left:6px}
+F2NEN{}
+Gram{color: #007a6c !important;
+background: rgba(0, 122, 108, .2);
+border-radius: 3px;font-size:0.9em;margin-left:6px}
+GramEN{}
+HINT{margin-left:6px;font-style:normal;font-size:0.9em}
+HintEN{}
+i{}
+img[src*="spkr_r"]{max-height:1em;margin-bottom:-3px;margin-right:0px;margin-left:6px}
+.registerlab + img[src*="spkr_r"] {margin-left:0px}
+img[src*="spkr_b"]{max-height:1em;margin-bottom:-3px;margin-right:0px;margin-left:2px}
+/*img[src*="spkr_r"], img[src*="spkr_b"] {
+    display: none !important;
+}*/
+img[src*="spkr_g"]{max-height:.7em;margin-bottom:0;margin-right:1px}
+object{font-weight:normal}
+.menuitem SIGN{color: #1d2a57}
+SIGN{margin-left: 5px}
+.menuitem SIGNEN{color: #1d2a57}
+span.infllab{
+    color: #1d2a57;
+    font-style:italic;
+    font-weight:400;
+    padding-right:2px;
+    margin-left:6px
+    }
+span.italic{color:black;font-style:italic;font-weight:normal}
+span.keycollo{font-weight:bold;color:blue}
+span.neutral{font-style:normal;font-weight:normal;font-variant:normal;color:#444;text-decoration:none}
+span.colon{display: none !important; /* 确保冒号被隐藏 */}
+span.sensenum{font-style:normal;font-weight:bold;margin-right:8px;color:#ed1941}
+span.sensenum + .registerlab {margin-left:0px}
+span.synopp{vertical-align:1px;padding-left:3px;padding-right:3px;border-radius:2px 2px 2px 2px;border-style:solid;border-width:1px;font-variant:small-caps;font-size:0.75em;font-weight: bold;color:#6dbdff;margin-right:0px;margin-left:6px}
+span.synopp.grammar-tag {margin-right:2px}
+span.warning{font-style:normal;font-weight:bold;color:#6dbdff;margin-left:10px;}
+span[onclick*="toggle"]{-webkit-touch-callout:none;-webkit-user-select:none;-khtml-user-select:none;-moz-user-select:none;-ms-user-select:none;user-select:none}
+.gramexa collot,.def tran{
+margin-left:3px;
+font-size:1em;
+color: #007a6c !important;
+background: rgba(0, 122, 108, .2);
+border-radius: 3px}
+ul.exas li{font-size:0.95em;font-weight:normal;color:rgba(51, 102, 153, 0.8)}
+ul.exas{margin-top:.5em;margin-bottom:.5em;padding-left:2em;padding-right:1em}
+Usage{color: #007a6c !important;
+background: rgba(0, 122, 108, .2);
+border-radius: 3px;font-size:9em;margin-left:6px}
+UsageEN{}
+.proncodes {}
+.pron{color:#527cb4;padding-left:1px;padding-right:1px;margin-left:4px;
+/*cursor: pointer;*/
+} /*音标*/
+/*.pron::before {
+    content: "";
+    display: inline-block;
+    width: 1.1em;
+    height: 1.1em;
+    background-image: url('spkr_r2.png');
+    background-size: contain;
+    background-repeat: no-repeat;
+    vertical-align: middle;
+    margin-left: 4px;
+    margin-right: 4px;
+}*/
+.amevarpron{color:#bd6778;padding-right:1px;margin-left:4px;
+/*cursor: pointer;*/
+} /*音标*/
+/*.amevarpron::before {
+    content: "";
+    display: inline-block;
+    width: 1.1em;
+    height: 1.1em;
+    background-image: url('spkr_b2.png');
+    background-size: contain;
+    background-repeat: no-repeat;
+    vertical-align: middle;
+    margin-left: 2px;
+    margin-right: 4px;
+}*/
+.collo example{font-weight:normal}
+.def{color:#4F4F4F}
+.defcn{
+  margin-left:6px;
+  color: #1d3e99;/*#1d3e99;#02309b;*/
+  }
+expcn{
+    font-size: 1em;
+    display: block;
+    font-style:normal;
+    color:#8299ae;
+    margin-left:17px
+    }
+.collocn{
+    margin-left:6px;
+    color:#4b80b6;
+    font-size: 0.9em;
+    }
+explcn{
+    margin-left:0px;
+    font-style:normal;
+    display:block;
+    color:#8299ae;
+    }
+.gramcn{margin-left:6px}
+
+
+/* **** TOPIC ***** */
+.ws_info {
+  display: block;
+  padding: 0.3em 0.4em;
+  border-radius: 0.4em;
+  background-color: hsla(220, 45%, 70%, 0.07);
+  margin-bottom: 0.2em;
+  opacity: 0.85;
+  display:none
+}
+
+.ws_info .related_topics {
+  color: var(--gray);
+  font-size: 0.88em;
+  margin-right: 0.5em;
+  font-weight: 600;
+}
+@media screen and (max-width: 500px) {
+  .ws_info .related_topics {
+    display: none;
+  }
+}
+
+.ws_info > a {
+  margin-right: 0.7em;
+  font-size: 0.88em;
+  font-weight: 400;
+  color: var(--black);
+}
+
+.ws_info > a:before {
+  content: "❑\00a0";
+  display: inline-block;
+  font-size: 0.85em;
+  margin-right: 0.08em;
+  color: var(--btn-blue);
+  vertical-align: 0.02em;
+}
+.ws_info > a:hover {
+  color: var(--hw);
+  border-bottom: 1px dashed #35a3ff;
+}
+*/
