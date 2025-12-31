@@ -27,7 +27,7 @@ body {
 }
 
 .container {
-    max-width: 900px;
+    max-width: 1000px;
     margin: 0 auto;
     padding: 40px 20px;
 }
@@ -83,7 +83,7 @@ h1 {
     padding: 8px;
     border-radius: 16px;
     border: 1px solid var(--border);
-    box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
     transition: border-color 0.2s, box-shadow 0.2s;
     position: relative;
     flex-wrap: wrap;
@@ -161,7 +161,7 @@ kbd {
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: 12px;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
     max-height: 300px;
     overflow-y: auto;
     z-index: 1000;
@@ -204,7 +204,7 @@ kbd {
     border-radius: 16px;
     border: 1px solid var(--border);
     overflow: hidden;
-    box-shadow: 0 4px 24px rgba(0,0,0,0.2);
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.2);
 }
 
 .result-header {
@@ -288,10 +288,15 @@ footer span {
     .search-box {
         flex-direction: column;
     }
+
     .search-btn {
         width: 100%;
     }
-    h1 { font-size: 1.5rem; }
+
+    h1 {
+        font-size: 1.5rem;
+    }
+
     .container {
         padding: 20px 15px;
     }
@@ -426,7 +431,9 @@ footer span {
 }
 
 @keyframes spin {
-    to { transform: rotate(360deg); }
+    to {
+        transform: rotate(360deg);
+    }
 }
 
 .loading-state p {
@@ -454,7 +461,7 @@ footer span {
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: 12px;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
     z-index: 1000;
     overflow: hidden;
 }
@@ -534,4 +541,3 @@ footer span {
         right: 0;
     }
 }
-
