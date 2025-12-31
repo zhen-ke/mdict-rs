@@ -28,7 +28,7 @@ pub fn query_with_trace(word: String) -> Result<(Vec<String>, String), String> {
 
 /// Check if a word redirects via @@@LINK= and return the target
 fn get_link_target(word: &str) -> Option<String> {
-    for file in MDX_FILES {
+    for file in MDX_FILES.iter() {
         if file.ends_with(".mdd") {
             continue;
         }
@@ -78,7 +78,7 @@ fn query_internal(word: String, depth: u8) -> Result<(Vec<u8>, String), String> 
     }
 
     let w = word.clone();
-    for file in MDX_FILES {
+    for file in MDX_FILES.iter() {
         let conn = get_db_connection(file).map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare("select record_offset, record_length, block_offset, block_size, block_dsize from MDX_INDEX WHERE text= :word limit 1;")

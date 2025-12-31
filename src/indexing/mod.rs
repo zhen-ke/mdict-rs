@@ -9,7 +9,7 @@ use crate::mdict::mdx::Mdx;
 use tracing::info;
 
 /// indexing all mdx files into db
-pub(crate) fn indexing(files: &[&str], reindex: bool) -> anyhow::Result<()> {
+pub(crate) fn indexing(files: &[String], reindex: bool) -> anyhow::Result<()> {
     for file in files {
         let db_file_name = format!("{}{}", file, ".db");
         let db_path = PathBuf::from(&db_file_name);

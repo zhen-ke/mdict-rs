@@ -12,16 +12,16 @@
     <script src="index.js"></script>
     <link rel="stylesheet" type="text/css" href="index.css"/>
     <link rel="stylesheet" type="text/css" href="lm6.css"/>
-    <title>MDX 极速词典</title>
+    <title>MDict 极速词典</title>
 </head>
 <body>
     <div class="container">
         <header>
             <div class="logo">
                 <div class="logo-icon">📖</div>
-                <h1>MDX 极速词典</h1>
+                <h1>MDict 极速词典</h1>
             </div>
-            <p class="subtitle">由 Rust + Sled 驱动，极致轻量高效</p>
+            <p class="subtitle">Rust + SQLite 驱动，轻量高效</p>
         </header>
 
         <div class="search-container">
@@ -44,6 +44,7 @@
             <div class="result-header">
                 <div class="result-icon">📝</div>
                 <span class="result-title">查询结果</span>
+                <button id="share-btn" class="share-btn" title="复制分享链接" style="display: none;">🔗 分享</button>
             </div>
             <div id="mdx-resp" class="lm6">
                 <div class="empty-state">

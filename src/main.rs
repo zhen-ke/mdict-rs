@@ -26,17 +26,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with(EnvFilter::new("info"))
         .with(tracing_subscriber::fmt::layer())
         .init();
-    // 解析mdx到sqlite数据库
-    indexing(MDX_FILES, false).expect("indexing failed");
 
-    let static_dir = ServeDir::new(static_path()?);
+    // 解析mdx到sqlite数据库
+    indexing(&MDX_FILES, false).expect("indexing failed");
+
+    // 静态文件服务
+    let static_dir = static_path()?;
+    info!("Serving static files from: {:?}", static_dir);
 
     let app = Router::new()
         .route("/query", post(handle_query))
         .route("/suggest", get(handle_suggest))
         .route("/lucky", get(handle_lucky))
         .route("/trace", get(handle_trace))
-        .fallback(handle_resource)
+        // 词典资源处理 (音频、图片等)
+        .route("/{*path}", get(handle_resource))
+        // 静态文件服务 (index.html, css, js)
+        .fallback_service(ServeDir::new(&static_dir))
         .layer(TraceLayer::new_for_http());
 
     let port = 8181;
