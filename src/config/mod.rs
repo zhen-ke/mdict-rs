@@ -9,6 +9,9 @@ use r2d2_sqlite::SqliteConnectionManager;
 use tracing::{info, error, warn};
 use crate::mdict::reader::MdxReader;
 
+mod dict_config;
+pub use dict_config::{DictConfig, DictInfo};
+
 /// 获取词典目录路径
 /// 优先级:
 /// 1. 环境变量 MDX_DICT_DIR
@@ -281,4 +284,59 @@ fn load_fst_index(fst_path: &str) -> anyhow::Result<fst::Map<memmap2::Mmap>> {
 /// 获取 FST 索引
 pub fn get_fst_index(file: &str) -> Option<&fst::Map<memmap2::Mmap>> {
     FST_INDEXES.get(file)
+}
+
+/// 词典配置缓存
+pub static DICT_CONFIGS: LazyLock<HashMap<String, DictConfig>> = LazyLock::new(|| {
+    info!("Loading dictionary configs...");
+    let mut configs = HashMap::new();
+
+    for file in MDX_FILES.iter() {
+        // Only load configs for .mdx files, not .mdd
+        if file.ends_with(".mdd") {
+            continue;
+        }
+
+        if let Some(config) = DictConfig::load(file) {
+            info!("Loaded config for: {}", file);
+            configs.insert(file.clone(), config);
+        }
+    }
+
+    info!("Loaded {} dictionary configs", configs.len());
+    configs
+});
+
+/// 获取词典配置
+pub fn get_dict_config(mdx_file: &str) -> Option<&DictConfig> {
+    DICT_CONFIGS.get(mdx_file)
+}
+
+/// 获取词典目录（公开版本）
+pub fn get_dict_directory() -> PathBuf {
+    get_dict_dir()
+}
+
+/// 获取所有词典信息（用于 API 响应）
+pub fn get_all_dict_info() -> Vec<DictInfo> {
+    let dict_dir = get_dict_dir();
+
+    MDX_FILES
+        .iter()
+        .filter(|f| f.ends_with(".mdx"))
+        .map(|file| {
+            let config = get_dict_config(file);
+            let default_config = DictConfig::default();
+            let cfg = config.unwrap_or(&default_config);
+
+            DictInfo {
+                id: file.clone(),
+                name: cfg.get_display_name(file),
+                description: cfg.description.clone(),
+                container_class: cfg.container_class.clone(),
+                has_css: cfg.css.is_some(),
+                has_js: cfg.js.is_some(),
+            }
+        })
+        .collect()
 }

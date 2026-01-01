@@ -1,5 +1,8 @@
 use crate::config::{MDX_FILES, static_path};
-use crate::handlers::{handle_lucky, handle_query, handle_resource, handle_suggest, handle_trace};
+use crate::handlers::{
+    handle_lucky, handle_query, handle_resource, handle_suggest, handle_trace,
+    handle_dict_list, handle_dict_style, handle_dict_script
+};
 use crate::indexing::indexing;
 
 use axum::{
@@ -39,6 +42,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .route("/suggest", get(handle_suggest))
         .route("/lucky", get(handle_lucky))
         .route("/trace", get(handle_trace))
+        // Dictionary config API
+        .route("/api/dicts", get(handle_dict_list))
+        .route("/api/dict/style", get(handle_dict_style))
+        .route("/api/dict/script", get(handle_dict_script))
         // 词典资源处理 (音频、图片等)
         .route("/{*path}", get(handle_resource))
         // 静态文件服务 (index.html, css, js)

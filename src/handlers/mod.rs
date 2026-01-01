@@ -1,10 +1,10 @@
 use crate::lucky;
 use crate::query::{query, query_with_trace, suggest};
+use crate::config::{static_path, get_all_dict_info, get_dict_config, get_dict_directory, DictInfo};
 use serde_derive::Deserialize;
 
 use axum::{extract::{Path, Form, Query}, response::{Response, IntoResponse, Json}, http::{StatusCode, Uri}};
 use tokio::fs;
-use crate::config::static_path;
 
 #[derive(Deserialize, Debug)]
 pub struct SuggestQuery {
@@ -123,5 +123,79 @@ pub(crate) async fn handle_resource(uri: Uri) -> Response {
     axum::http::Response::builder()
         .status(StatusCode::NOT_FOUND)
         .body("Not Found".into())
+        .unwrap()
+}
+
+// ============ Dictionary Config API ============
+
+#[derive(Deserialize, Debug)]
+pub struct DictQuery {
+    /// Dictionary ID (file path) or name
+    pub id: Option<String>,
+}
+
+/// GET /api/dicts - Get list of all dictionaries with their configs
+pub(crate) async fn handle_dict_list() -> Json<Vec<DictInfo>> {
+    Json(get_all_dict_info())
+}
+
+/// GET /api/dict/style?id=xxx - Get custom CSS for a dictionary
+pub(crate) async fn handle_dict_style(Query(params): Query<DictQuery>) -> Response {
+    let id = match params.id {
+        Some(id) => id,
+        None => {
+            return axum::http::Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header("Content-Type", "text/plain")
+                .body("Missing 'id' parameter".into())
+                .unwrap();
+        }
+    };
+
+    // Try to find the dictionary config
+    if let Some(config) = get_dict_config(&id) {
+        let dict_dir = get_dict_directory();
+        let css_content = config.get_css_content(&dict_dir);
+
+        return axum::http::Response::builder()
+            .header("Content-Type", "text/css; charset=utf-8")
+            .body(css_content.into())
+            .unwrap();
+    }
+
+    axum::http::Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header("Content-Type", "text/plain")
+        .body("Dictionary config not found".into())
+        .unwrap()
+}
+
+/// GET /api/dict/script?id=xxx - Get custom JavaScript for a dictionary
+pub(crate) async fn handle_dict_script(Query(params): Query<DictQuery>) -> Response {
+    let id = match params.id {
+        Some(id) => id,
+        None => {
+            return axum::http::Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header("Content-Type", "text/plain")
+                .body("Missing 'id' parameter".into())
+                .unwrap();
+        }
+    };
+
+    if let Some(config) = get_dict_config(&id) {
+        let dict_dir = get_dict_directory();
+        let js_content = config.get_js_content(&dict_dir);
+
+        return axum::http::Response::builder()
+            .header("Content-Type", "application/javascript; charset=utf-8")
+            .body(js_content.into())
+            .unwrap();
+    }
+
+    axum::http::Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header("Content-Type", "text/plain")
+        .body("Dictionary config not found".into())
         .unwrap()
 }
