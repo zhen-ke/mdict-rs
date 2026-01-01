@@ -11,10 +11,10 @@ It's at an early stage of development, now only supports mdx version 2.0 with en
 3. run with:
 
 ```bash
-cargo run --bin mdict-rs
+cargo run --release
 # now open your chrome, and search
 # http://localhost:8181
-``` 
+```
 
 ## screenshot
 

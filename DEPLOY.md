@@ -77,8 +77,20 @@ ps aux | grep mdict-rs
 # 上传新词典
 scp 新词典.mdx root@armbian:/DATA/Documents/mdict-server/mdict/
 
+# 上传静态资源
+scp resources/static/* root@armbian:/DATA/Documents/mdict-server/static/
+
+# 上传二进制
+scp target/aarch64-unknown-linux-musl/release/mdict-rs root@armbian:/DATA/Documents/mdict-server/
+
 # 重启服务 (自动建索引)
-ssh root@armbian "sudo systemctl restart mdict"
+sudo systemctl restart mdict
+
+# 停止服务
+systemctl stop mdict
+
+# 查看日志
+journalctl -u mdict -fdict
 ```
 
 ## 🔍 故障排查
