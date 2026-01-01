@@ -9,7 +9,7 @@
     --text: #f1f5f9;
     --text-muted: #94a3b8;
     --border: #475569;
-    --accent: #22d3ee;
+    --accent: #ff5050;
 }
 
 * {
@@ -520,9 +520,9 @@ footer span {
    Search Highlighting
    ============================================= */
 .search-highlight {
-    background: rgba(34, 211, 238, 0.25);
+    background: rgba(255, 80, 80, 0.25);
     color: var(--accent);
-    padding: 1px 2px;
+    padding: 1px 5px;
     border-radius: 3px;
     font-weight: 600;
 }

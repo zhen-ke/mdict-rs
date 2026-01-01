@@ -524,15 +524,15 @@ var d8018d6852bc49e3b3e655364cf1439c = {
         Array.prototype.forEach.call(hyphenations, function(el) {
             // 检查是否有折叠功能（通过查找关联的可折叠元素）
             var container = el.closest('.entry');
-            var hasToggle = container && this.getToggleTargets(container).length > 0;
-            if (hasToggle) {
-                el.addEventListener('mouseenter', function() {
-                    this.style.color = '#1e45b0'; // 悬停时变为深蓝
-                });
-                el.addEventListener('mouseleave', function() {
-                    this.style.color = '#4169E1'; // 恢复默认颜色
-                });
-            }
+            // var hasToggle = container && this.getToggleTargets(container).length > 0;
+            // if (hasToggle) {
+            //     el.addEventListener('mouseenter', function() {
+            //         this.style.color = '#1e45b0'; // 悬停时变为深蓝
+            //     });
+            //     el.addEventListener('mouseleave', function() {
+            //         this.style.color = '#ff5050'; // 恢复默认颜色
+            //     });
+            // }
         }.bind(this));
 
         // ❑符号悬停效果
