@@ -8,6 +8,9 @@ use memmap2::MmapOptions;
 use crate::mdict::mdx::Mdx;
 use tracing::info;
 
+mod fst;
+pub use fst::build_fst_index;
+
 /// indexing all mdx files into db
 pub(crate) fn indexing(files: &[String], reindex: bool) -> anyhow::Result<()> {
     for file in files {
@@ -21,6 +24,16 @@ pub(crate) fn indexing(files: &[String], reindex: bool) -> anyhow::Result<()> {
             }
         } else {
             mdx_to_sqlite(file).expect("indexing failed");
+        }
+
+        // Build FST index after SQLite indexing (only for .mdx files, not .mdd)
+        if !file.ends_with(".mdd") {
+            let fst_path = PathBuf::from(format!("{}.fst", file));
+            if !fst_path.exists() || reindex {
+                if let Err(e) = build_fst_index(&db_file_name) {
+                    tracing::warn!("Failed to build FST index for {}: {}", file, e);
+                }
+            }
         }
     }
 
@@ -76,4 +89,3 @@ pub(crate) fn mdx_to_sqlite(file: &str) -> anyhow::Result<()> {
     conn.close().expect("close db connection failed");
     Ok(())
 }
-

@@ -233,3 +233,52 @@ pub fn get_mdx_reader(file: &str) -> anyhow::Result<&MdxReader> {
         .get(file)
         .ok_or_else(|| anyhow::anyhow!("No reader found for file: {}", file))
 }
+
+/// FST 索引缓存 - 使用 memmap 懒加载，节省内存
+pub static FST_INDEXES: LazyLock<HashMap<String, fst::Map<memmap2::Mmap>>> = LazyLock::new(|| {
+    info!("Initializing FST indexes...");
+    let mut map = HashMap::new();
+
+    if MDX_FILES.is_empty() {
+        warn!("No dictionary files found, FST_INDEXES will be empty");
+        return map;
+    }
+
+    for file in MDX_FILES.iter() {
+        // Skip .mdd files (they don't have text entries)
+        if file.ends_with(".mdd") {
+            continue;
+        }
+
+        let fst_path = format!("{}.fst", file);
+        if !std::path::Path::new(&fst_path).exists() {
+            warn!("FST file not found: {}, fuzzy search disabled for this dict", fst_path);
+            continue;
+        }
+
+        match load_fst_index(&fst_path) {
+            Ok(fst_map) => {
+                info!("Loaded FST index: {} ({} entries)", fst_path, fst_map.len());
+                map.insert(file.to_string(), fst_map);
+            }
+            Err(e) => {
+                error!("Failed to load FST index {}: {}", fst_path, e);
+            }
+        }
+    }
+
+    map
+});
+
+/// 加载 FST 索引文件
+fn load_fst_index(fst_path: &str) -> anyhow::Result<fst::Map<memmap2::Mmap>> {
+    let file = fs::File::open(fst_path)?;
+    let mmap = unsafe { memmap2::MmapOptions::new().map(&file)? };
+    let fst_map = fst::Map::new(mmap)?;
+    Ok(fst_map)
+}
+
+/// 获取 FST 索引
+pub fn get_fst_index(file: &str) -> Option<&fst::Map<memmap2::Mmap>> {
+    FST_INDEXES.get(file)
+}
