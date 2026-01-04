@@ -79,13 +79,31 @@ pub(crate) async fn handle_resource(uri: Uri) -> Response {
     }
 
     // 2. Try to find in file system (Static Resources)
-    if let Ok(mut static_dir) = static_path() {
+    if let Ok(base_static_dir) = static_path() {
         let relative_path = path.trim_start_matches('/');
+
+        // Security: Reject paths with directory traversal patterns
+        if relative_path.contains("..") {
+            tracing::warn!("Rejected path traversal attempt: {}", path);
+            return not_found();
+        }
+
+        let mut static_dir = base_static_dir.clone();
         if relative_path.is_empty() || relative_path.ends_with('/') {
             static_dir.push(relative_path);
             static_dir.push("index.html");
         } else {
             static_dir.push(relative_path);
+        }
+
+        // Security: Verify the final path is within static directory
+        if let Ok(canonical) = static_dir.canonicalize() {
+            if let Ok(base_canonical) = base_static_dir.canonicalize() {
+                if !canonical.starts_with(&base_canonical) {
+                    tracing::warn!("Path escape attempt blocked: {:?}", static_dir);
+                    return not_found();
+                }
+            }
         }
 
         if static_dir.exists() && static_dir.is_file() {

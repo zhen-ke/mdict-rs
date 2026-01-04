@@ -18,12 +18,12 @@ pub(crate) fn indexing(files: &[String], reindex: bool) -> anyhow::Result<()> {
         let db_path = PathBuf::from(&db_file_name);
         if db_path.exists() {
             if reindex {
-                fs::remove_file(&db_file_name).expect("remove old db file error");
+                fs::remove_file(&db_file_name)?;
                 info!("old db file:{} removed", &db_file_name);
-                mdx_to_sqlite(file).expect("indexing failed");
+                mdx_to_sqlite(file)?;
             }
         } else {
-            mdx_to_sqlite(file).expect("indexing failed");
+            mdx_to_sqlite(file)?;
         }
 
         // Build FST index after SQLite indexing (only for .mdx files, not .mdd)
@@ -45,9 +45,9 @@ pub(crate) fn mdx_to_sqlite(file: &str) -> anyhow::Result<()> {
     let db_file = format!("{}{}", file, ".db");
     let mut conn = Connection::open(&db_file)?;
     // Enable WAL mode and set timeout to prevent locking issues
-    conn.pragma_update(None, "journal_mode", "WAL").unwrap();
-    conn.pragma_update(None, "synchronous", "NORMAL").unwrap();
-    conn.pragma_update(None, "busy_timeout", "5000").unwrap();
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.pragma_update(None, "busy_timeout", "5000")?;
     let file_path = PathBuf::from(file);
     let mmap = unsafe {
         MmapOptions::new().map(&fs::File::open(&file_path)?)?
@@ -86,6 +86,7 @@ pub(crate) fn mdx_to_sqlite(file: &str) -> anyhow::Result<()> {
             .with_context(|| "insert MDX_INDEX table error")?;
     }
     tx.commit().with_context(|| "transaction commit error")?;
-    conn.close().expect("close db connection failed");
+    // Connection will be closed automatically when dropped
+    drop(conn);
     Ok(())
 }
