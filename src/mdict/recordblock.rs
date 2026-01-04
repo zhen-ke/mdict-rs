@@ -32,7 +32,17 @@ fn parse_record_blocks_v1(data: &[u8]) -> IResult<&[u8], Vec<RecordBlockSize>> {
     let (data, (records_num, _entries_num, record_info_len, _record_buf_len)) =
         (be_u32, be_u32, be_u32, be_u32).parse(data)?;
 
-    assert_eq!(records_num * 8, record_info_len);
+    // Validate record info length
+    if records_num * 8 != record_info_len {
+        tracing::error!(
+            "V1 record info length mismatch: {} * 8 != {}",
+            records_num, record_info_len
+        );
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            data,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
 
     count(
         map((be_u32, be_u32), |(csize, dsize)| RecordBlockSize {
@@ -48,7 +58,17 @@ fn parse_record_blocks_v2(data: &[u8]) -> IResult<&[u8], Vec<RecordBlockSize>> {
     let (data, (records_num, _entries_num, record_info_len, _record_buf_len)) =
         (be_u64, be_u64, be_u64, be_u64).parse(data)?;
 
-    assert_eq!(records_num * 16, record_info_len,);
+    // Validate record info length
+    if records_num * 16 != record_info_len {
+        tracing::error!(
+            "V2 record info length mismatch: {} * 16 != {}",
+            records_num, record_info_len
+        );
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            data,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
 
     count(
         map((be_u64, be_u64), |(csize, dsize)| RecordBlockSize {
@@ -94,11 +114,16 @@ pub(crate) fn record_block_parser<'a>(
             match comp_method {
                 0 => data,
                 1 => {
-                    let lzo = minilzo_rs::LZO::init().unwrap(); // LZO init rarely fails
-                    match lzo.decompress(&data[..], dsize) {
-                        Ok(v) => v,
+                    match minilzo_rs::LZO::init() {
+                        Ok(lzo) => match lzo.decompress(&data[..], dsize) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::error!("lzo decompress failed: {:?}", e);
+                                vec![]
+                            }
+                        },
                         Err(e) => {
-                            tracing::error!("lzo decompress failed: {:?}", e);
+                            tracing::error!("LZO init failed: {:?}", e);
                             vec![]
                         }
                     }

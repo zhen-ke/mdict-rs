@@ -1,9 +1,9 @@
+use anyhow::Context;
 use crate::mdict::header::parse_header;
 use crate::mdict::keyblock::{
     RecordDeBufOffset, parse_key_block_header, parse_key_block_info, parse_key_blocks,
 };
 use crate::mdict::recordblock::{RecordBlockSize, parse_record_blocks};
-// use nom::Parser;
 
 /// 一个record的定位信息：在buf(buf表示所有record_block的bytes)中的offset和在block解压后的offset
 /// draw with: https://asciiflow.com/#/
@@ -53,7 +53,6 @@ pub struct Record<'a> {
 /// record: 是一条释义
 pub struct Mdx {
     pub records_offset: Vec<RecordOffsetInfo>,
-    // pub record_block_buf: &'a [u8], // Removed for offset-based strategy
     #[allow(unused)]
     pub encoding: String,
     #[allow(unused)]
@@ -61,38 +60,54 @@ pub struct Mdx {
 }
 
 impl Mdx {
+    /// Parse an MDX file from bytes.
+    ///
+    /// # Arguments
+    /// * `data` - The raw bytes of the MDX file
+    ///
+    /// # Returns
+    /// * `Ok(Mdx)` - Successfully parsed MDX structure
+    /// * `Err` - Parse error with context
+    ///
+    /// # Example
+    /// ```ignore
     /// let data = include_bytes!("/file.mdx");
-    /// let mdx = Mdx::new(&data);
-    pub fn new(data: &[u8]) -> Mdx {
+    /// let mdx = Mdx::new(&data)?;
+    /// ```
+    pub fn new(data: &[u8]) -> anyhow::Result<Mdx> {
         let input_len = data.len();
-        let (data, header) = parse_header(data).unwrap();
 
-        let (data, kbh) = parse_key_block_header(data, &header).unwrap();
-        let (data, key_blocks_size) =
-            parse_key_block_info(data, kbh.key_block_info_len, &header).unwrap();
-        let (data, entries) =
-            parse_key_blocks(data, kbh.key_blocks_len, &header, &key_blocks_size).unwrap();
-        let (rest, record_blocks_size) = parse_record_blocks(data, &header).unwrap();
+        let (data, header) = parse_header(data)
+            .context("Failed to parse MDX header")?;
+
+        let (data, kbh) = parse_key_block_header(data, &header)
+            .map_err(|e| anyhow::anyhow!("Failed to parse key block header: {:?}", e))?;
+
+        let (data, key_blocks_size) = parse_key_block_info(data, kbh.key_block_info_len, &header)
+            .map_err(|e| anyhow::anyhow!("Failed to parse key block info: {:?}", e))?;
+
+        let (data, entries) = parse_key_blocks(data, kbh.key_blocks_len, &header, &key_blocks_size)
+            .map_err(|e| anyhow::anyhow!("Failed to parse key blocks: {:?}", e))?;
+
+        let (rest, record_blocks_size) = parse_record_blocks(data, &header)
+            .map_err(|e| anyhow::anyhow!("Failed to parse record blocks: {:?}", e))?;
 
         let base_offset = input_len - rest.len();
 
-        //计算position耗时，一次计算就保存下来
-        let offset: Vec<RecordOffsetInfo> = records_offset(&entries, &record_blocks_size, base_offset);
+        // 计算position耗时，一次计算就保存下来
+        let offset = records_offset(&entries, &record_blocks_size, base_offset);
 
-        Mdx {
+        Ok(Mdx {
             records_offset: offset,
-            // record_block_buf: data,
             encoding: header.encoding,
             encrypted: header.encrypted,
-        }
+        })
     }
 
     #[allow(unused)]
     pub fn entries(&self) -> impl Iterator<Item = &RecordOffsetInfo> {
         self.records_offset.iter()
     }
-
-
 }
 
 /// bytes structure: buf -> block -> record(entry)
@@ -101,10 +116,12 @@ fn records_offset(
     record_blocks_size: &Vec<RecordBlockSize>,
     base_offset: usize,
 ) -> Vec<RecordOffsetInfo> {
-    let mut positions: Vec<RecordOffsetInfo> = vec![];
+    // Pre-allocate capacity for better performance
+    let mut positions: Vec<RecordOffsetInfo> = Vec::with_capacity(records_debuf_index.len());
     let mut i: usize = 0;
     let mut pre_blocks_dsize_sum = 0;
     let mut pre_blocks_csize_sum = 0;
+
     // 同时开始遍历record_blocks_size和entries，每个block包含0或n个entry，
     // 当entry的buf_decompressed_offset > pre_blocks_dsize_sum时 说明当前block已经遍历结束
     for block in record_blocks_size {
@@ -116,14 +133,13 @@ fn records_offset(
                 break;
             }
 
-            let record_end_in_de_block;
-            if i < records_debuf_index.len() - 1 {
+            let record_end_in_de_block = if i < records_debuf_index.len() - 1 {
                 let next_entry = &records_debuf_index[i + 1];
-                record_end_in_de_block = next_entry.record_offset_in_debuf - pre_blocks_dsize_sum;
+                next_entry.record_offset_in_debuf - pre_blocks_dsize_sum
             } else {
                 // last entry
-                record_end_in_de_block = block.dsize
-            }
+                block.dsize
+            };
 
             positions.push(RecordOffsetInfo {
                 text: record.text.to_string(),
@@ -131,12 +147,12 @@ fn records_offset(
                 block_csize: block.csize,
                 block_dsize: block.dsize,
                 record_start_in_de_block: record.record_offset_in_debuf - pre_blocks_dsize_sum,
-                record_end_in_de_block: record_end_in_de_block,
+                record_end_in_de_block,
             });
             i += 1;
         }
         pre_blocks_dsize_sum += block.dsize;
         pre_blocks_csize_sum += block.csize;
     }
-    return positions;
+    positions
 }

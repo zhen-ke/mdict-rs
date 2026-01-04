@@ -52,7 +52,7 @@ pub(crate) fn mdx_to_sqlite(file: &str) -> anyhow::Result<()> {
     let mmap = unsafe {
         MmapOptions::new().map(&fs::File::open(&file_path)?)?
     };
-    let mdx = Mdx::new(&mmap);
+    let mdx = Mdx::new(&mmap)?;
 
     conn.execute(
         "create table if not exists MDX_INDEX (

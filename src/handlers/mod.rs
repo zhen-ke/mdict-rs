@@ -1,9 +1,15 @@
+mod error;
+mod response;
+
+pub use error::AppError;
+use response::{ok_response, css_response, js_response, not_found};
+
 use crate::lucky;
 use crate::query::{query, query_with_trace, suggest};
 use crate::config::{static_path, get_all_dict_info, get_dict_config, get_dict_directory, DictInfo};
 use serde_derive::Deserialize;
 
-use axum::{extract::{Path, Form, Query}, response::{Response, IntoResponse, Json}, http::{StatusCode, Uri}};
+use axum::{extract::{Form, Query}, response::{Response, Json}, http::Uri};
 use tokio::fs;
 
 #[derive(Deserialize, Debug)]
@@ -16,41 +22,26 @@ pub struct QueryForm {
     word: String,
 }
 
-pub(crate) async fn handle_query(Form(params): Form<QueryForm>) -> Response {
-    match query(params.word) {
-        Ok((data, content_type)) => axum::http::Response::builder()
-            .header("Content-Type", content_type)
-            .body(data.into())
-            .unwrap(),
-        Err(e) => {
-            // 区分 "not found" 和其他错误
-            let status = if e == "not found" { 404 } else { 500 };
-            axum::http::Response::builder()
-                .status(status)
-                .body(e.into())
-                .unwrap()
-        }
-    }
+pub(crate) async fn handle_query(Form(params): Form<QueryForm>) -> Result<Response, AppError> {
+    tracing::info!("Processing query for word: {}", params.word);
+    let (data, content_type) = query(params.word)?;
+    Ok(ok_response(data, &content_type))
 }
 
-pub(crate) async fn handle_lucky() -> Response {
+pub(crate) async fn handle_lucky() -> Result<Response, AppError> {
     let word = lucky::lucky_word();
-    match query(word) {
-        Ok((data, content_type)) => axum::http::Response::builder()
-            .header("Content-Type", content_type)
-            .body(data.into())
-            .unwrap(),
-        Err(e) => axum::http::Response::builder()
-            .status(500)
-            .body(e.into())
-            .unwrap(),
-    }
+    tracing::info!("Lucky query for word: {}", word);
+    let (data, content_type) = query(word)?;
+    Ok(ok_response(data, &content_type))
 }
 
 pub(crate) async fn handle_suggest(Query(params): Query<SuggestQuery>) -> Json<Vec<String>> {
     match suggest(params.q, 10) {
         Ok(suggestions) => Json(suggestions),
-        Err(_) => Json(vec![]),
+        Err(e) => {
+            tracing::warn!("Suggest failed: {}", e);
+            Json(vec![])
+        }
     }
 }
 
@@ -75,55 +66,42 @@ pub(crate) async fn handle_resource(uri: Uri) -> Response {
 
     // Candidate keys to try
     let candidates = vec![
-        key.clone(),                       // \img\foo.png
-        path.to_string(),                  // /img/foo.png
+        key.clone(),                              // \img\foo.png
+        path.to_string(),                         // /img/foo.png
         path.trim_start_matches('/').to_string(), // img/foo.png
     ];
 
-    for candidate in candidates {
-        tracing::info!("resource try key: {}", candidate);
-        if let Ok((data, content_type)) = query(candidate) {
-            return axum::http::Response::builder()
-                .header("Content-Type", content_type)
-                .body(data.into())
-                .unwrap();
+    for candidate in &candidates {
+        tracing::debug!("resource try key: {}", candidate);
+        if let Ok((data, content_type)) = query(candidate.clone()) {
+            return ok_response(data, &content_type);
         }
     }
-
-    // Attempt with different prefix if needed? e.g. key without leading slash
-    // ...
 
     // 2. Try to find in file system (Static Resources)
-    // Map URI to file path
-    if let Ok(mut static_path) = static_path() {
-        // Remove leading slash to append
-        let mut relative_path = path.trim_start_matches('/');
+    if let Ok(mut static_dir) = static_path() {
+        let relative_path = path.trim_start_matches('/');
         if relative_path.is_empty() || relative_path.ends_with('/') {
-            static_path.push(relative_path);
-            static_path.push("index.html");
+            static_dir.push(relative_path);
+            static_dir.push("index.html");
         } else {
-            static_path.push(relative_path);
+            static_dir.push(relative_path);
         }
 
-        if static_path.exists() && static_path.is_file() {
-             match fs::read(&static_path).await {
+        if static_dir.exists() && static_dir.is_file() {
+            match fs::read(&static_dir).await {
                 Ok(bytes) => {
-                    // Guess mime type
-                    let mime_type = mime_guess::from_path(&static_path).first_or_octet_stream();
-                    return axum::http::Response::builder()
-                        .header("Content-Type", mime_type.as_ref())
-                        .body(bytes.into())
-                        .unwrap();
+                    let mime_type = mime_guess::from_path(&static_dir).first_or_octet_stream();
+                    return ok_response(bytes, mime_type.as_ref());
                 }
-                Err(_) => {}
-             }
+                Err(e) => {
+                    tracing::warn!("Failed to read static file {:?}: {}", static_dir, e);
+                }
+            }
         }
     }
 
-    axum::http::Response::builder()
-        .status(StatusCode::NOT_FOUND)
-        .body("Not Found".into())
-        .unwrap()
+    not_found()
 }
 
 // ============ Dictionary Config API ============
@@ -140,62 +118,29 @@ pub(crate) async fn handle_dict_list() -> Json<Vec<DictInfo>> {
 }
 
 /// GET /api/dict/style?id=xxx - Get custom CSS for a dictionary
-pub(crate) async fn handle_dict_style(Query(params): Query<DictQuery>) -> Response {
-    let id = match params.id {
-        Some(id) => id,
-        None => {
-            return axum::http::Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .header("Content-Type", "text/plain")
-                .body("Missing 'id' parameter".into())
-                .unwrap();
-        }
-    };
+pub(crate) async fn handle_dict_style(Query(params): Query<DictQuery>) -> Result<Response, AppError> {
+    let id = params.id.ok_or_else(|| AppError::BadRequest("Missing 'id' parameter".to_string()))?;
 
-    // Try to find the dictionary config
     if let Some(config) = get_dict_config(&id) {
         let dict_dir = get_dict_directory();
         let css_content = config.get_css_content(&dict_dir);
-
-        return axum::http::Response::builder()
-            .header("Content-Type", "text/css; charset=utf-8")
-            .body(css_content.into())
-            .unwrap();
+        return Ok(css_response(css_content));
     }
 
-    axum::http::Response::builder()
-        .status(StatusCode::NOT_FOUND)
-        .header("Content-Type", "text/plain")
-        .body("Dictionary config not found".into())
-        .unwrap()
+    tracing::warn!("Dictionary config not found for id: {}", id);
+    Err(AppError::NotFound)
 }
 
 /// GET /api/dict/script?id=xxx - Get custom JavaScript for a dictionary
-pub(crate) async fn handle_dict_script(Query(params): Query<DictQuery>) -> Response {
-    let id = match params.id {
-        Some(id) => id,
-        None => {
-            return axum::http::Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .header("Content-Type", "text/plain")
-                .body("Missing 'id' parameter".into())
-                .unwrap();
-        }
-    };
+pub(crate) async fn handle_dict_script(Query(params): Query<DictQuery>) -> Result<Response, AppError> {
+    let id = params.id.ok_or_else(|| AppError::BadRequest("Missing 'id' parameter".to_string()))?;
 
     if let Some(config) = get_dict_config(&id) {
         let dict_dir = get_dict_directory();
         let js_content = config.get_js_content(&dict_dir);
-
-        return axum::http::Response::builder()
-            .header("Content-Type", "application/javascript; charset=utf-8")
-            .body(js_content.into())
-            .unwrap();
+        return Ok(js_response(js_content));
     }
 
-    axum::http::Response::builder()
-        .status(StatusCode::NOT_FOUND)
-        .header("Content-Type", "text/plain")
-        .body("Dictionary config not found".into())
-        .unwrap()
+    tracing::warn!("Dictionary config not found for id: {}", id);
+    Err(AppError::NotFound)
 }

@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
 use adler32::adler32;
+use anyhow::{Context, bail};
 use encoding::{Encoding, all::UTF_16LE};
 use nom::multi::length_data;
 use nom::number::complete::{be_u32, le_u32};
-use nom::{IResult, Parser};
+use nom::Parser;
 use regex::Regex;
 use tracing::info;
 
@@ -28,17 +29,34 @@ pub struct Header {
     pub encoding: String,
 }
 
-pub fn parse_header(data: &[u8]) -> IResult<&[u8], Header> {
-    // length_data(be_u32) 先读取一个be_u32 number,然后根据number读取对应长度bytes
-    let (data, (header_buf, checksum)) = (length_data(be_u32), le_u32).parse(data)?;
-    // &[8] 实现Read接口
-    assert_eq!(adler32(header_buf).unwrap(), checksum);
-    // string from utf_16le encoding
+/// Parse header using nom, but return anyhow::Result for better error handling
+pub fn parse_header(data: &[u8]) -> anyhow::Result<(&[u8], Header)> {
+    // Use nom to parse length-prefixed data
+    let (data, (header_buf, checksum)) = (length_data(be_u32), le_u32)
+        .parse(data)
+        .map_err(|e: nom::Err<nom::error::Error<&[u8]>>| {
+            anyhow::anyhow!("Failed to parse header length/checksum: {:?}", e)
+        })?;
+
+    // Verify checksum
+    let computed_checksum = adler32(header_buf)
+        .context("Failed to compute adler32 checksum")?;
+    if computed_checksum != checksum {
+        bail!(
+            "Header checksum mismatch: computed {} != expected {}",
+            computed_checksum,
+            checksum
+        );
+    }
+
+    // Decode UTF-16LE header content
     let info = UTF_16LE
         .decode(header_buf, encoding::DecoderTrap::Strict)
-        .unwrap();
+        .map_err(|e| anyhow::anyhow!("Failed to decode header as UTF-16LE: {}", e))?;
 
-    let re = Regex::new(r#"(\w+)="((.|\r\n|[\r\n])*?)""#).unwrap();
+    // Parse header attributes
+    let re = Regex::new(r#"(\w+)="((.|\r\n|[\r\n])*?)""#)
+        .context("Failed to compile regex")?;
     let mut attrs = HashMap::new();
     for cap in re.captures_iter(info.as_str()) {
         attrs.insert(cap[1].to_string(), cap[2].to_string());
@@ -46,20 +64,25 @@ pub fn parse_header(data: &[u8]) -> IResult<&[u8], Header> {
 
     info!(">>>the header content: {:?}", &attrs);
 
-    let version = attrs
+    // Parse version
+    let version_str = attrs
         .get("GeneratedByEngineVersion")
-        .unwrap()
+        .context("Missing 'GeneratedByEngineVersion' attribute in header")?;
+
+    let version_char = version_str
         .trim()
         .chars()
         .next()
-        .unwrap()
-        .to_digit(10)
-        .unwrap() as u8;
+        .context("Empty 'GeneratedByEngineVersion' value")?;
 
-    let version = match version {
+    let version_num = version_char
+        .to_digit(10)
+        .context(format!("Invalid version digit: '{}'", version_char))? as u8;
+
+    let version = match version_num {
         1 => Version::V1,
         2 => Version::V2,
-        _ => panic!("unsupported mdx engine version!, {}", &version),
+        _ => bail!("Unsupported MDX engine version: {}", version_num),
     };
 
     // "0" "2" "3" - MDD 文件也可能没有 Encrypted 属性
