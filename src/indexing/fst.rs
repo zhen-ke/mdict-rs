@@ -36,13 +36,6 @@ pub fn build_fst_index(db_path: &str) -> Result<PathBuf> {
          ORDER BY word"
     )?;
 
-    let words: Vec<String> = stmt
-        .query_map([], |row| row.get(0))?
-        .filter_map(|r| r.ok())
-        .collect();
-
-    info!("Found {} unique words for FST index", words.len());
-
     // Build FST
     let file = File::create(&fst_path)
         .with_context(|| format!("Failed to create FST file: {:?}", fst_path))?;
@@ -54,8 +47,12 @@ pub fn build_fst_index(db_path: &str) -> Result<PathBuf> {
     // Our SQL query already orders by lowercase word
     let mut prev_word: Option<String> = None;
     let mut added_count = 0u64;
+    let mut row_count = 0u64;
+    let mut rows = stmt.query([])?;
 
-    for word in words {
+    while let Some(row) = rows.next()? {
+        row_count += 1;
+        let word: String = row.get(0)?;
         // Skip duplicates (case-insensitive)
         if prev_word.as_ref() == Some(&word) {
             continue;
@@ -84,6 +81,7 @@ pub fn build_fst_index(db_path: &str) -> Result<PathBuf> {
     builder.finish()
         .with_context(|| "Failed to finish FST build")?;
 
+    info!("Scanned {} rows for FST index", row_count);
     info!("FST index built successfully: {} entries", added_count);
 
     Ok(fst_path)

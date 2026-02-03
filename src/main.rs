@@ -11,7 +11,7 @@ use axum::{
 };
 use std::error::Error;
 use tower_http::{services::ServeDir, trace::TraceLayer};
-use tracing::info;
+use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
@@ -30,8 +30,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // 解析mdx到sqlite数据库
-    indexing(&MDX_FILES, false).expect("indexing failed");
+    // 解析mdx到sqlite数据库（后台执行，避免阻塞启动）
+    let files = MDX_FILES.clone();
+    tokio::spawn(async move {
+        if files.is_empty() {
+            return;
+        }
+        info!("Starting background indexing for {} dictionaries", files.len());
+        match tokio::task::spawn_blocking(move || indexing(&files, false)).await {
+            Ok(Ok(())) => info!("Background indexing completed"),
+            Ok(Err(e)) => error!("Background indexing failed: {}", e),
+            Err(e) => error!("Background indexing task failed: {}", e),
+        }
+    });
 
     // 静态文件服务
     let static_dir = static_path()?;

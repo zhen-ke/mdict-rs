@@ -36,6 +36,7 @@ pub struct RecordOffsetInfo {
 
 // todo: why can not be String?
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct Record<'a> {
     pub(crate) text: &'a str,
     pub(crate) definition: String,

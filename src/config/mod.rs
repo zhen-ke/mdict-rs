@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::env;
-use std::path::PathBuf;
-use std::sync::LazyLock;
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -117,6 +117,30 @@ fn scan_dict_files() -> Vec<String> {
 /// 动态扫描的词典文件列表
 pub static MDX_FILES: LazyLock<Vec<String>> = LazyLock::new(scan_dict_files);
 
+/// 仅包含 .mdx 的词典（文本查询）
+pub static MDX_TEXT_FILES: LazyLock<Vec<String>> = LazyLock::new(|| {
+    MDX_FILES
+        .iter()
+        .filter(|f| f.ends_with(".mdx"))
+        .cloned()
+        .collect()
+});
+
+/// 资源优先：.mdd 在前，.mdx 在后（资源查询）
+pub static MDX_RESOURCE_FILES: LazyLock<Vec<String>> = LazyLock::new(|| {
+    let mut mdd = Vec::new();
+    let mut mdx = Vec::new();
+    for file in MDX_FILES.iter() {
+        if file.ends_with(".mdd") {
+            mdd.push(file.clone());
+        } else {
+            mdx.push(file.clone());
+        }
+    }
+    mdd.extend(mdx);
+    mdd
+});
+
 /// 获取静态资源路径
 /// 优先级:
 /// 1. 二进制同级的 static 文件夹
@@ -150,128 +174,88 @@ pub fn static_path() -> anyhow::Result<PathBuf> {
 }
 
 /// 全局数据库连接池，为每个MDX文件维护一个连接池
-pub static DB_POOLS: LazyLock<HashMap<String, Pool<SqliteConnectionManager>>> =
-    LazyLock::new(|| {
-        info!("Initializing database pools...");
-        let mut pools = HashMap::new();
+pub static DB_POOLS: LazyLock<Mutex<HashMap<String, Pool<SqliteConnectionManager>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
-        if MDX_FILES.is_empty() {
-            warn!("No dictionary files to index, DB_POOLS will be empty");
-            return pools;
-        }
-
-        for file in MDX_FILES.iter() {
-            let db_file = format!("{file}.db");
-
-            // 检查 db 文件是否存在
-            if !std::path::Path::new(&db_file).exists() {
-                warn!("Database file not found: {}, waiting for indexing...", db_file);
-                continue;
-            }
-
-            let manager = SqliteConnectionManager::file(&db_file).with_init(|conn| {
-                // SQLite 性能优化 (使用 ok() 忽略错误，避免 panic)
-                let _ = conn.pragma_update(None, "busy_timeout", "5000");
-                let _ = conn.pragma_update(None, "journal_mode", "WAL");
-                let _ = conn.pragma_update(None, "synchronous", "NORMAL");
-                let _ = conn.pragma_update(None, "cache_size", "-64000");
-                Ok(())
-            });
-
-            match Pool::builder()
-                .max_size(10)
-                .min_idle(Some(2))
-                .build(manager) {
-                Ok(pool) => {
-                    pools.insert(file.to_string(), pool);
-                }
-                Err(e) => {
-                    error!("Failed to create connection pool for {}: {}", db_file, e);
-                }
-            }
-        }
-
-        pools
+fn build_pool(db_file: &str) -> anyhow::Result<Pool<SqliteConnectionManager>> {
+    let manager = SqliteConnectionManager::file(db_file).with_init(|conn| {
+        // SQLite 性能优化 (使用 ok() 忽略错误，避免 panic)
+        let _ = conn.pragma_update(None, "busy_timeout", "5000");
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+        let _ = conn.pragma_update(None, "cache_size", "-64000");
+        // Ensure prefix search can use NOCASE index when table exists
+        let _ = conn.execute(
+            "create index if not exists idx_mdx_text_nocase on MDX_INDEX(text COLLATE NOCASE)",
+            [],
+        );
+        Ok(())
     });
+
+    Pool::builder()
+        .max_size(10)
+        .min_idle(Some(2))
+        .build(manager)
+        .map_err(|e| anyhow::anyhow!("Failed to create connection pool for {}: {}", db_file, e))
+}
 
 /// 从连接池获取数据库连接
 pub fn get_db_connection(
     file: &str,
 ) -> anyhow::Result<r2d2::PooledConnection<SqliteConnectionManager>> {
-    info!("get connection from pool...");
-    let pools = &*DB_POOLS;
-    let pool = pools
+    if let Some(pool) = DB_POOLS
+        .lock()
+        .expect("DB_POOLS mutex poisoned")
         .get(file)
-        .ok_or_else(|| anyhow::anyhow!("No connection pool found for file: {}", file))?;
+        .cloned()
+    {
+        return pool
+            .get()
+            .map_err(|e| anyhow::anyhow!("Failed to get connection from pool: {}", e));
+    }
+
+    let db_file = format!("{file}.db");
+    if !Path::new(&db_file).exists() {
+        return Err(anyhow::anyhow!("Database file not found: {}", db_file));
+    }
+
+    let pool = build_pool(&db_file)?;
+    let pool = {
+        let mut guard = DB_POOLS
+            .lock()
+            .expect("DB_POOLS mutex poisoned");
+        guard.entry(file.to_string()).or_insert(pool).clone()
+    };
 
     pool.get()
         .map_err(|e| anyhow::anyhow!("Failed to get connection from pool: {}", e))
 }
 
 /// MDX 读取器缓存
-pub static MDX_RESOURCES: LazyLock<HashMap<String, MdxReader>> = LazyLock::new(|| {
-    info!("Initializing MDX readers...");
-    let mut map = HashMap::new();
+pub static MDX_RESOURCES: LazyLock<Mutex<HashMap<String, Arc<MdxReader>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
-    if MDX_FILES.is_empty() {
-        warn!("No dictionary files found, MDX_RESOURCES will be empty");
-        return map;
-    }
-
-    for file in MDX_FILES.iter() {
-        match MdxReader::new(file) {
-            Ok(reader) => {
-                map.insert(file.to_string(), reader);
-            }
-            Err(e) => {
-                error!("Failed to create reader for {}: {}", file, e);
-            }
-        }
-    }
-    map
-});
-
-pub fn get_mdx_reader(file: &str) -> anyhow::Result<&MdxReader> {
-    MDX_RESOURCES
+pub fn get_mdx_reader(file: &str) -> anyhow::Result<Arc<MdxReader>> {
+    if let Some(reader) = MDX_RESOURCES
+        .lock()
+        .expect("MDX_RESOURCES mutex poisoned")
         .get(file)
-        .ok_or_else(|| anyhow::anyhow!("No reader found for file: {}", file))
+        .cloned()
+    {
+        return Ok(reader);
+    }
+
+    let reader = Arc::new(MdxReader::new(file)?);
+    let mut map = MDX_RESOURCES
+        .lock()
+        .expect("MDX_RESOURCES mutex poisoned");
+    let entry = map.entry(file.to_string()).or_insert_with(|| reader.clone());
+    Ok(entry.clone())
 }
 
 /// FST 索引缓存 - 使用 memmap 懒加载，节省内存
-pub static FST_INDEXES: LazyLock<HashMap<String, fst::Map<memmap2::Mmap>>> = LazyLock::new(|| {
-    info!("Initializing FST indexes...");
-    let mut map = HashMap::new();
-
-    if MDX_FILES.is_empty() {
-        warn!("No dictionary files found, FST_INDEXES will be empty");
-        return map;
-    }
-
-    for file in MDX_FILES.iter() {
-        // Skip .mdd files (they don't have text entries)
-        if file.ends_with(".mdd") {
-            continue;
-        }
-
-        let fst_path = format!("{}.fst", file);
-        if !std::path::Path::new(&fst_path).exists() {
-            warn!("FST file not found: {}, fuzzy search disabled for this dict", fst_path);
-            continue;
-        }
-
-        match load_fst_index(&fst_path) {
-            Ok(fst_map) => {
-                info!("Loaded FST index: {} ({} entries)", fst_path, fst_map.len());
-                map.insert(file.to_string(), fst_map);
-            }
-            Err(e) => {
-                error!("Failed to load FST index {}: {}", fst_path, e);
-            }
-        }
-    }
-
-    map
-});
+pub static FST_INDEXES: LazyLock<Mutex<HashMap<String, Arc<fst::Map<memmap2::Mmap>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// 加载 FST 索引文件
 fn load_fst_index(fst_path: &str) -> anyhow::Result<fst::Map<memmap2::Mmap>> {
@@ -282,8 +266,40 @@ fn load_fst_index(fst_path: &str) -> anyhow::Result<fst::Map<memmap2::Mmap>> {
 }
 
 /// 获取 FST 索引
-pub fn get_fst_index(file: &str) -> Option<&fst::Map<memmap2::Mmap>> {
-    FST_INDEXES.get(file)
+pub fn get_fst_index(file: &str) -> Option<Arc<fst::Map<memmap2::Mmap>>> {
+    {
+        let map = FST_INDEXES
+            .lock()
+            .expect("FST_INDEXES mutex poisoned");
+        if let Some(fst_map) = map.get(file) {
+            return Some(fst_map.clone());
+        }
+    }
+
+    // Skip .mdd files (they don't have text entries)
+    if file.ends_with(".mdd") {
+        return None;
+    }
+
+    let fst_path = format!("{}.fst", file);
+    if !Path::new(&fst_path).exists() {
+        return None;
+    }
+
+    match load_fst_index(&fst_path) {
+        Ok(fst_map) => {
+            let fst_map = Arc::new(fst_map);
+            let mut map = FST_INDEXES
+                .lock()
+                .expect("FST_INDEXES mutex poisoned");
+            let entry = map.entry(file.to_string()).or_insert_with(|| fst_map.clone());
+            Some(entry.clone())
+        }
+        Err(e) => {
+            error!("Failed to load FST index {}: {}", fst_path, e);
+            None
+        }
+    }
 }
 
 /// 词典配置缓存
@@ -319,8 +335,6 @@ pub fn get_dict_directory() -> PathBuf {
 
 /// 获取所有词典信息（用于 API 响应）
 pub fn get_all_dict_info() -> Vec<DictInfo> {
-    let dict_dir = get_dict_dir();
-
     MDX_FILES
         .iter()
         .filter(|f| f.ends_with(".mdx"))

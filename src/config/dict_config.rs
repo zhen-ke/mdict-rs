@@ -4,7 +4,7 @@
 //! for custom styles, scripts, and metadata.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_derive::Deserialize;
 use tracing::{info, warn};
@@ -19,6 +19,7 @@ pub struct DictConfig {
     pub description: Option<String>,
 
     /// Version string
+    #[allow(dead_code)]
     pub version: Option<String>,
 
     /// Custom CSS (inline or @file reference)

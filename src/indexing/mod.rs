@@ -66,27 +66,33 @@ pub(crate) fn mdx_to_sqlite(file: &str) -> anyhow::Result<()> {
         params![],
     )
         .with_context(|| "create table failed")?;
+    conn.execute(
+        "create index if not exists idx_mdx_text_nocase on MDX_INDEX(text COLLATE NOCASE)",
+        params![],
+    )
+        .with_context(|| "create index failed")?;
 
     let tx = conn
         .transaction()
         .with_context(|| "get transaction from connection failed")?;
 
-    for r in mdx.entries() {
-        tx.execute(
-            "insert or replace into MDX_INDEX values (?,?,?,?,?,?)",
-            params![
+    {
+        let mut stmt = tx
+            .prepare_cached("insert or replace into MDX_INDEX values (?,?,?,?,?,?)")
+            .with_context(|| "prepare insert statement failed")?;
+
+        for r in mdx.entries() {
+            stmt.execute(params![
                 r.text,
                 r.record_start_in_de_block,
                 r.record_end_in_de_block - r.record_start_in_de_block,
                 r.block_offset_in_buf,
                 r.block_csize,
                 r.block_dsize
-            ],
-        )
-            .with_context(|| "insert MDX_INDEX table error")?;
+            ])
+                .with_context(|| "insert MDX_INDEX table error")?;
+        }
     }
     tx.commit().with_context(|| "transaction commit error")?;
-    // Connection will be closed automatically when dropped
-    drop(conn);
     Ok(())
 }

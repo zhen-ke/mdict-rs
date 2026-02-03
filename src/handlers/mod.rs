@@ -23,23 +23,36 @@ pub struct QueryForm {
 }
 
 pub(crate) async fn handle_query(Form(params): Form<QueryForm>) -> Result<Response, AppError> {
-    tracing::info!("Processing query for word: {}", params.word);
-    let (data, content_type) = query(params.word)?;
+    let word = params.word;
+    tracing::info!("Processing query for word: {}", word);
+    let result = tokio::task::spawn_blocking(move || query(word))
+        .await
+        .map_err(|e| AppError::Internal(format!("query task failed: {}", e)))?;
+    let (data, content_type) = result.map_err(AppError::from)?;
     Ok(ok_response(data, &content_type))
 }
 
 pub(crate) async fn handle_lucky() -> Result<Response, AppError> {
     let word = lucky::lucky_word();
     tracing::info!("Lucky query for word: {}", word);
-    let (data, content_type) = query(word)?;
+    let result = tokio::task::spawn_blocking(move || query(word))
+        .await
+        .map_err(|e| AppError::Internal(format!("query task failed: {}", e)))?;
+    let (data, content_type) = result.map_err(AppError::from)?;
     Ok(ok_response(data, &content_type))
 }
 
 pub(crate) async fn handle_suggest(Query(params): Query<SuggestQuery>) -> Json<Vec<String>> {
-    match suggest(params.q, 10) {
-        Ok(suggestions) => Json(suggestions),
-        Err(e) => {
+    let q = params.q;
+    let result = tokio::task::spawn_blocking(move || suggest(q, 10)).await;
+    match result {
+        Ok(Ok(suggestions)) => Json(suggestions),
+        Ok(Err(e)) => {
             tracing::warn!("Suggest failed: {}", e);
+            Json(vec![])
+        }
+        Err(e) => {
+            tracing::warn!("Suggest task failed: {}", e);
             Json(vec![])
         }
     }
@@ -48,14 +61,19 @@ pub(crate) async fn handle_suggest(Query(params): Query<SuggestQuery>) -> Json<V
 /// Debug endpoint to show @@@LINK redirect chain
 /// Usage: GET /trace?word=whams
 pub(crate) async fn handle_trace(Query(params): Query<SuggestQuery>) -> Json<serde_json::Value> {
-    match query_with_trace(params.q) {
-        Ok((chain, final_word)) => Json(serde_json::json!({
+    let q = params.q;
+    let result = tokio::task::spawn_blocking(move || query_with_trace(q)).await;
+    match result {
+        Ok(Ok((chain, final_word))) => Json(serde_json::json!({
             "chain": chain,
             "depth": chain.len() - 1,
             "final_word": final_word,
         })),
-        Err(e) => Json(serde_json::json!({
+        Ok(Err(e)) => Json(serde_json::json!({
             "error": e,
+        })),
+        Err(e) => Json(serde_json::json!({
+            "error": format!("trace task failed: {}", e),
         })),
     }
 }
@@ -64,21 +82,7 @@ pub(crate) async fn handle_resource(uri: Uri) -> Response {
     let path = uri.path();
     let key = path.replace("/", "\\"); // standard mdict key starts with \ e.g. \img\foo.png
 
-    // Candidate keys to try
-    let candidates = vec![
-        key.clone(),                              // \img\foo.png
-        path.to_string(),                         // /img/foo.png
-        path.trim_start_matches('/').to_string(), // img/foo.png
-    ];
-
-    for candidate in &candidates {
-        tracing::debug!("resource try key: {}", candidate);
-        if let Ok((data, content_type)) = query(candidate.clone()) {
-            return ok_response(data, &content_type);
-        }
-    }
-
-    // 2. Try to find in file system (Static Resources)
+    // 1. Try to find in file system (Static Resources)
     if let Ok(base_static_dir) = static_path() {
         let relative_path = path.trim_start_matches('/');
 
@@ -117,6 +121,30 @@ pub(crate) async fn handle_resource(uri: Uri) -> Response {
                 }
             }
         }
+    }
+
+    // Candidate keys to try
+    let candidates = vec![
+        key.clone(),                              // \img\foo.png
+        path.to_string(),                         // /img/foo.png
+        path.trim_start_matches('/').to_string(), // img/foo.png
+    ];
+
+    let result = tokio::task::spawn_blocking(move || {
+        for candidate in candidates {
+            tracing::debug!("resource try key: {}", candidate);
+            if let Ok((data, content_type)) = query(candidate) {
+                return Some(ok_response(data, &content_type));
+            }
+        }
+        None
+    })
+    .await;
+
+    match result {
+        Ok(Some(response)) => return response,
+        Ok(None) => {}
+        Err(e) => tracing::warn!("Resource query task failed: {}", e),
     }
 
     not_found()

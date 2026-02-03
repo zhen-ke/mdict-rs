@@ -1,6 +1,6 @@
 use rusqlite::named_params;
-use tracing::{info, error};
-use crate::config::{get_db_connection, MDX_FILES, get_mdx_reader, get_fst_index};
+use tracing::{debug, error, info};
+use crate::config::{get_db_connection, MDX_RESOURCE_FILES, MDX_TEXT_FILES, get_mdx_reader, get_fst_index};
 use std::path::Path;
 use fst::automaton::Levenshtein;
 use fst::{IntoStreamer, Streamer};
@@ -30,12 +30,11 @@ pub fn query_with_trace(word: String) -> Result<(Vec<String>, String), String> {
 
 /// Check if a word redirects via @@@LINK= and return the target
 fn get_link_target(word: &str) -> Option<String> {
-    for file in MDX_FILES.iter() {
-        if file.ends_with(".mdd") {
-            continue;
-        }
-
-        let conn = get_db_connection(file).ok()?;
+    for file in MDX_TEXT_FILES.iter() {
+        let conn = match get_db_connection(file) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
         let mut stmt = conn
             .prepare("select record_offset, record_length, block_offset, block_size, block_dsize from MDX_INDEX WHERE text= :word limit 1;")
             .ok()?;
@@ -72,6 +71,10 @@ fn get_link_target(word: &str) -> Option<String> {
     None
 }
 
+fn is_resource_key(word: &str) -> bool {
+    word.starts_with('\\') || word.starts_with('/')
+}
+
 /// Internal query with redirect depth limit to prevent infinite loops
 fn query_internal(word: String, depth: u8) -> Result<(Vec<u8>, String), String> {
     // Prevent infinite redirect loops
@@ -80,12 +83,24 @@ fn query_internal(word: String, depth: u8) -> Result<(Vec<u8>, String), String> 
     }
 
     let w = word.clone();
-    for file in MDX_FILES.iter() {
-        let conn = get_db_connection(file).map_err(|e| e.to_string())?;
+    let files = if is_resource_key(&w) {
+        &MDX_RESOURCE_FILES
+    } else {
+        &MDX_TEXT_FILES
+    };
+
+    for file in files.iter() {
+        let conn = match get_db_connection(file) {
+            Ok(c) => c,
+            Err(e) => {
+                debug!("skip dict {}: {}", file, e);
+                continue;
+            }
+        };
         let mut stmt = conn
             .prepare("select record_offset, record_length, block_offset, block_size, block_dsize from MDX_INDEX WHERE text= :word limit 1;")
             .map_err(|e| e.to_string())?;
-        info!("query params={}, dict={}", &w, file);
+        debug!("query params={}, dict={}", &w, file);
 
         let mut rows = stmt.query(named_params! { ":word": w }).map_err(|e| e.to_string())?;
 
@@ -106,26 +121,24 @@ fn query_internal(word: String, depth: u8) -> Result<(Vec<u8>, String), String> 
             })?;
 
             // Check for @@@LINK= redirect
-            if let Ok(text) = String::from_utf8(data.clone()) {
-                // Get first non-empty line and check for @@@LINK=
-                let first_line = text.lines().next().unwrap_or("").trim();
-                if first_line.starts_with("@@@LINK=") {
-                    let linked_word: String = first_line
-                        .trim_start_matches("@@@LINK=")
-                        .chars()
-                        .filter(|c| !c.is_control())  // Remove all control characters
-                        .collect::<String>()
-                        .trim()
-                        .to_string();
-                    if !linked_word.is_empty() {
-                        info!("following @@@LINK redirect: {} -> {}", w, linked_word);
-                        return query_internal(linked_word, depth + 1);
-                    }
+            let text = String::from_utf8_lossy(&data);
+            let first_line = text.lines().next().unwrap_or("").trim();
+            if first_line.starts_with("@@@LINK=") {
+                let linked_word: String = first_line
+                    .trim_start_matches("@@@LINK=")
+                    .chars()
+                    .filter(|c| !c.is_control())  // Remove all control characters
+                    .collect::<String>()
+                    .trim()
+                    .to_string();
+                if !linked_word.is_empty() {
+                    info!("following @@@LINK redirect: {} -> {}", w, linked_word);
+                    return query_internal(linked_word, depth + 1);
                 }
             }
 
             // Determine Content-Type
-            let content_type = if w.starts_with("\\") || w.starts_with("/") {
+            let content_type = if is_resource_key(&w) {
                 let path = Path::new(&w);
                 match path.extension().and_then(|s| s.to_str()) {
                     Some("jpg") | Some("jpeg") => "image/jpeg",
@@ -159,18 +172,14 @@ pub fn suggest(prefix: String, limit: usize) -> Result<Vec<String>, String> {
     let mut candidates: Vec<(String, i32)> = Vec::new(); // (word, score)
 
     // 1. 前缀匹配（高优先级）
-    for file in MDX_FILES.iter() {
-        if file.ends_with(".mdd") {
-            continue;
-        }
-
+    for file in MDX_TEXT_FILES.iter() {
         if let Ok(conn) = get_db_connection(file) {
             let query_limit = limit * 10;
             let pattern = format!("{}%", prefix_lower);
 
             let mut stmt = match conn.prepare(
                 "SELECT text FROM MDX_INDEX
-                 WHERE LOWER(text) LIKE :pattern
+                 WHERE text LIKE :pattern COLLATE NOCASE
                  AND text NOT LIKE '\\%'
                  AND text NOT LIKE '@%'
                  AND text NOT LIKE '%@%'
@@ -284,7 +293,7 @@ fn calculate_score(prefix: &str, word_lower: &str, word: &str) -> i32 {
     }
 
     // Exact prefix match (case-sensitive) gets bonus
-    if word.to_lowercase().starts_with(prefix) {
+    if word_lower.starts_with(prefix) {
         score += 100;
     }
 
@@ -339,11 +348,7 @@ fn fuzzy_search(query: &str, limit: usize) -> Vec<(String, u32)> {
     let mut results: Vec<(String, u32)> = Vec::new();
 
     // 遍历所有词典的 FST 索引
-    for file in MDX_FILES.iter() {
-        if file.ends_with(".mdd") {
-            continue;
-        }
-
+    for file in MDX_TEXT_FILES.iter() {
         if let Some(fst_map) = get_fst_index(file) {
             // 创建 Levenshtein 自动机
             let automaton = match Levenshtein::new(&query_lower, distance) {
