@@ -28,6 +28,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 memmap2 = "0.9.9"
 mime_guess = "2.0.5"
 serde_json = "1.0.148"
-fst = { version = "0.4", features = ["levenshtein"] }
 toml = "0.8"
 lru = "0.12"

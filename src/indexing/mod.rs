@@ -6,10 +6,7 @@ use rusqlite::{params, Connection};
 use memmap2::MmapOptions;
 
 use crate::mdict::mdx::Mdx;
-use tracing::info;
-
-mod fst;
-pub use fst::build_fst_index;
+use tracing::{info, warn};
 
 /// indexing all mdx files into db
 pub(crate) fn indexing(files: &[String], reindex: bool) -> anyhow::Result<()> {
@@ -24,16 +21,6 @@ pub(crate) fn indexing(files: &[String], reindex: bool) -> anyhow::Result<()> {
             }
         } else {
             mdx_to_sqlite(file)?;
-        }
-
-        // Build FST index after SQLite indexing (only for .mdx files, not .mdd)
-        if !file.ends_with(".mdd") {
-            let fst_path = PathBuf::from(format!("{}.fst", file));
-            if !fst_path.exists() || reindex {
-                if let Err(e) = build_fst_index(&db_file_name) {
-                    tracing::warn!("Failed to build FST index for {}: {}", file, e);
-                }
-            }
         }
     }
 
@@ -72,6 +59,22 @@ pub(crate) fn mdx_to_sqlite(file: &str) -> anyhow::Result<()> {
     )
         .with_context(|| "create index failed")?;
 
+    let is_text_dict = !file.ends_with(".mdd");
+    let mut fts_enabled = false;
+    if is_text_dict {
+        match conn.execute(
+            "create virtual table if not exists MDX_FTS using fts5(text, tokenize='unicode61 remove_diacritics 2')",
+            params![],
+        ) {
+            Ok(_) => {
+                fts_enabled = true;
+            }
+            Err(e) => {
+                warn!("FTS5 not available, skipping MDX_FTS for {}: {}", file, e);
+            }
+        }
+    }
+
     let tx = conn
         .transaction()
         .with_context(|| "get transaction from connection failed")?;
@@ -80,6 +83,14 @@ pub(crate) fn mdx_to_sqlite(file: &str) -> anyhow::Result<()> {
         let mut stmt = tx
             .prepare_cached("insert or replace into MDX_INDEX values (?,?,?,?,?,?)")
             .with_context(|| "prepare insert statement failed")?;
+        let mut fts_stmt = if fts_enabled {
+            Some(
+                tx.prepare_cached("insert into MDX_FTS(text) values (?)")
+                    .with_context(|| "prepare FTS insert statement failed")?,
+            )
+        } else {
+            None
+        };
 
         for r in mdx.entries() {
             stmt.execute(params![
@@ -91,8 +102,43 @@ pub(crate) fn mdx_to_sqlite(file: &str) -> anyhow::Result<()> {
                 r.block_dsize
             ])
                 .with_context(|| "insert MDX_INDEX table error")?;
+
+            if let Some(ref mut fts_stmt) = fts_stmt {
+                if should_index_in_fts(&r.text) {
+                    fts_stmt
+                        .execute(params![r.text])
+                        .with_context(|| "insert MDX_FTS table error")?;
+                }
+            }
         }
     }
     tx.commit().with_context(|| "transaction commit error")?;
     Ok(())
+}
+
+fn should_index_in_fts(text: &str) -> bool {
+    if text.is_empty() || text.len() > 50 {
+        return false;
+    }
+    if text.chars().any(|c| c.is_whitespace()) {
+        return false;
+    }
+    let mut chars = text.chars();
+    let first = match chars.next() {
+        Some(c) => c,
+        None => return false,
+    };
+    if first == '\\' || first == '/' || first == '@' || first == '-' || first == '.' {
+        return false;
+    }
+    if first.is_ascii_digit() {
+        return false;
+    }
+    if text.contains('@') || text.contains('<') || text.contains('>') {
+        return false;
+    }
+    if text.contains('/') || text.contains('\\') {
+        return false;
+    }
+    true
 }

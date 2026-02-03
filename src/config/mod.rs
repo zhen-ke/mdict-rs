@@ -253,55 +253,6 @@ pub fn get_mdx_reader(file: &str) -> anyhow::Result<Arc<MdxReader>> {
     Ok(entry.clone())
 }
 
-/// FST 索引缓存 - 使用 memmap 懒加载，节省内存
-pub static FST_INDEXES: LazyLock<Mutex<HashMap<String, Arc<fst::Map<memmap2::Mmap>>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// 加载 FST 索引文件
-fn load_fst_index(fst_path: &str) -> anyhow::Result<fst::Map<memmap2::Mmap>> {
-    let file = fs::File::open(fst_path)?;
-    let mmap = unsafe { memmap2::MmapOptions::new().map(&file)? };
-    let fst_map = fst::Map::new(mmap)?;
-    Ok(fst_map)
-}
-
-/// 获取 FST 索引
-pub fn get_fst_index(file: &str) -> Option<Arc<fst::Map<memmap2::Mmap>>> {
-    {
-        let map = FST_INDEXES
-            .lock()
-            .expect("FST_INDEXES mutex poisoned");
-        if let Some(fst_map) = map.get(file) {
-            return Some(fst_map.clone());
-        }
-    }
-
-    // Skip .mdd files (they don't have text entries)
-    if file.ends_with(".mdd") {
-        return None;
-    }
-
-    let fst_path = format!("{}.fst", file);
-    if !Path::new(&fst_path).exists() {
-        return None;
-    }
-
-    match load_fst_index(&fst_path) {
-        Ok(fst_map) => {
-            let fst_map = Arc::new(fst_map);
-            let mut map = FST_INDEXES
-                .lock()
-                .expect("FST_INDEXES mutex poisoned");
-            let entry = map.entry(file.to_string()).or_insert_with(|| fst_map.clone());
-            Some(entry.clone())
-        }
-        Err(e) => {
-            error!("Failed to load FST index {}: {}", fst_path, e);
-            None
-        }
-    }
-}
-
 /// 词典配置缓存
 pub static DICT_CONFIGS: LazyLock<HashMap<String, DictConfig>> = LazyLock::new(|| {
     info!("Loading dictionary configs...");
