@@ -81,7 +81,7 @@ scp 新词典.mdx root@armbian:/DATA/Documents/mdict-server/mdict/
 scp resources/static/* root@armbian:/DATA/Documents/mdict-server/static/
 
 # 上传二进制
-scp target/aarch64-unknown-linux-musl/release/mdict-rs root@armbian:/DATA/Documents/mdict-server/
+scp target/aarch64-unknown-linux-musl/release/mdict-rs root@192.168.100.2:/DATA/Documents/mdict-server/
 
 # 重启服务 (自动建索引)
 sudo systemctl restart mdict
@@ -90,7 +90,7 @@ sudo systemctl restart mdict
 systemctl stop mdict
 
 # 查看日志
-journalctl -u mdict -fdict
+journalctl -u mdict -f
 ```
 
 ## 🔍 故障排查
