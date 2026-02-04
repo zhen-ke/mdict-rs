@@ -1,9 +1,9 @@
-use anyhow::Context;
 use crate::mdict::header::parse_header;
 use crate::mdict::keyblock::{
     RecordDeBufOffset, parse_key_block_header, parse_key_block_info, parse_key_blocks,
 };
 use crate::mdict::recordblock::{RecordBlockSize, parse_record_blocks};
+use anyhow::Context;
 
 /// 一个record的定位信息：在buf(buf表示所有record_block的bytes)中的offset和在block解压后的offset
 /// draw with: https://asciiflow.com/#/
@@ -78,14 +78,14 @@ impl Mdx {
     pub fn new(data: &[u8]) -> anyhow::Result<Mdx> {
         let input_len = data.len();
 
-        let (data, header) = parse_header(data)
-            .context("Failed to parse MDX header")?;
+        let (data, header) = parse_header(data).context("Failed to parse MDX header")?;
 
         let (data, kbh) = parse_key_block_header(data, &header)
             .map_err(|e| anyhow::anyhow!("Failed to parse key block header: {:?}", e))?;
 
-        let (data, key_blocks_size) = parse_key_block_info(data, kbh.key_block_info_len, &header)
-            .map_err(|e| anyhow::anyhow!("Failed to parse key block info: {:?}", e))?;
+        let (data, key_blocks_size) =
+            parse_key_block_info(data, kbh.key_block_info_len, &header)
+                .map_err(|e| anyhow::anyhow!("Failed to parse key block info: {:?}", e))?;
 
         let (data, entries) = parse_key_blocks(data, kbh.key_blocks_len, &header, &key_blocks_size)
             .map_err(|e| anyhow::anyhow!("Failed to parse key blocks: {:?}", e))?;

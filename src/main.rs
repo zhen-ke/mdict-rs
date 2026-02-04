@@ -1,19 +1,21 @@
-use crate::config::{MDX_FILES, static_path};
+use crate::app_state::AppState;
+use crate::config::{get_dict_dir, scan_dict_files, static_path};
 use crate::handlers::{
-    handle_lucky, handle_query, handle_resource, handle_suggest, handle_trace,
-    handle_dict_list, handle_dict_style, handle_dict_script
+    handle_dict_list, handle_dict_script, handle_dict_style, handle_lucky, handle_query,
+    handle_resource, handle_suggest, handle_trace,
 };
-use crate::indexing::indexing;
+use crate::indexing::{db_path, indexing};
 
 use axum::{
     Router,
     routing::{get, post},
 };
 use std::error::Error;
-use tower_http::{services::ServeDir, trace::TraceLayer};
+use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
+mod app_state;
 mod config;
 mod handlers;
 mod indexing;
@@ -30,23 +32,39 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // 解析mdx到sqlite数据库（后台执行，避免阻塞启动）
-    let files = MDX_FILES.clone();
-    tokio::spawn(async move {
-        if files.is_empty() {
-            return;
-        }
-        info!("Starting background indexing for {} dictionaries", files.len());
-        match tokio::task::spawn_blocking(move || indexing(&files, false)).await {
-            Ok(Ok(())) => info!("Background indexing completed"),
-            Ok(Err(e)) => error!("Background indexing failed: {}", e),
-            Err(e) => error!("Background indexing task failed: {}", e),
-        }
-    });
-
-    // 静态文件服务
+    // 词典目录与静态资源目录
+    let dict_dir = get_dict_dir();
     let static_dir = static_path()?;
+
+    // 扫描词典文件
+    let mut dict_files = scan_dict_files(&dict_dir);
+
+    // 确保索引已生成（首次启动会花时间；后续有 .db 则很快）
+    if !dict_files.is_empty() {
+        let files = dict_files.clone();
+        info!("Ensuring indexes for {} dictionary files", files.len());
+        match tokio::task::spawn_blocking(move || indexing(&files, false)).await {
+            Ok(Ok(())) => info!("Indexing completed"),
+            Ok(Err(e)) => error!("Indexing finished with errors: {}", e),
+            Err(e) => error!("Indexing task failed: {}", e),
+        }
+
+        // 过滤掉没有生成 db 的词典文件，避免运行时查询报错
+        dict_files.retain(|file| {
+            let db = db_path(file);
+            if db.exists() {
+                true
+            } else {
+                error!("Skipping dict {:?}: missing db {:?}", file, db);
+                false
+            }
+        });
+    }
+
+    info!("Using dict dir: {:?}", dict_dir);
     info!("Serving static files from: {:?}", static_dir);
+
+    let state = AppState::new(dict_dir, static_dir.clone(), dict_files);
 
     let app = Router::new()
         .route("/query", post(handle_query))
@@ -57,14 +75,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .route("/api/dicts", get(handle_dict_list))
         .route("/api/dict/style", get(handle_dict_style))
         .route("/api/dict/script", get(handle_dict_script))
-        // 词典资源处理 (音频、图片等)
-        .route("/{*path}", get(handle_resource))
-        // 静态文件服务 (index.html, css, js)
-        .fallback_service(ServeDir::new(&static_dir))
-        .layer(TraceLayer::new_for_http());
+        // 静态文件 + 词典资源处理 (音频、图片等)
+        .fallback(handle_resource)
+        .layer(TraceLayer::new_for_http())
+        .with_state(state);
 
     let port = 8181;
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8181").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8181").await?;
 
     info!("app serve on http://localhost:{}", port);
 

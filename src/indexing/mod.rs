@@ -1,44 +1,63 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use rusqlite::{params, Connection};
 use memmap2::MmapOptions;
+use rusqlite::{Connection, params};
 
 use crate::mdict::mdx::Mdx;
 use tracing::{info, warn};
 
+pub(crate) fn db_path(dict_file: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.db", dict_file.to_string_lossy()))
+}
+
 /// indexing all mdx files into db
-pub(crate) fn indexing(files: &[String], reindex: bool) -> anyhow::Result<()> {
+pub(crate) fn indexing(files: &[PathBuf], reindex: bool) -> anyhow::Result<()> {
+    let mut failures: Vec<(PathBuf, anyhow::Error)> = Vec::new();
+
     for file in files {
-        let db_file_name = format!("{}{}", file, ".db");
-        let db_path = PathBuf::from(&db_file_name);
-        if db_path.exists() {
-            if reindex {
-                fs::remove_file(&db_file_name)?;
-                info!("old db file:{} removed", &db_file_name);
-                mdx_to_sqlite(file)?;
-            }
-        } else {
-            mdx_to_sqlite(file)?;
+        if let Err(e) = ensure_index(file, reindex) {
+            failures.push((file.clone(), e));
         }
     }
 
-    Ok(())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        for (file, err) in &failures {
+            warn!("Indexing failed for {:?}: {}", file, err);
+        }
+        Err(anyhow::anyhow!(
+            "Indexing failed for {} dictionaries",
+            failures.len()
+        ))
+    }
+}
+
+pub(crate) fn ensure_index(file: &Path, reindex: bool) -> anyhow::Result<()> {
+    let db_path = db_path(file);
+    if db_path.exists() {
+        if reindex {
+            fs::remove_file(&db_path)?;
+            info!("old db file:{:?} removed", db_path);
+            mdx_to_sqlite(file)?;
+        }
+        return Ok(());
+    }
+
+    mdx_to_sqlite(file)
 }
 
 /// mdx entries and definition to sqlite table
-pub(crate) fn mdx_to_sqlite(file: &str) -> anyhow::Result<()> {
-    let db_file = format!("{}{}", file, ".db");
+pub(crate) fn mdx_to_sqlite(file: &Path) -> anyhow::Result<()> {
+    let db_file = db_path(file);
     let mut conn = Connection::open(&db_file)?;
     // Enable WAL mode and set timeout to prevent locking issues
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "busy_timeout", "5000")?;
-    let file_path = PathBuf::from(file);
-    let mmap = unsafe {
-        MmapOptions::new().map(&fs::File::open(&file_path)?)?
-    };
+    let mmap = unsafe { MmapOptions::new().map(&fs::File::open(file)?)? };
     let mdx = Mdx::new(&mmap)?;
 
     conn.execute(
@@ -52,14 +71,16 @@ pub(crate) fn mdx_to_sqlite(file: &str) -> anyhow::Result<()> {
          )",
         params![],
     )
-        .with_context(|| "create table failed")?;
+    .with_context(|| "create table failed")?;
     conn.execute(
         "create index if not exists idx_mdx_text_nocase on MDX_INDEX(text COLLATE NOCASE)",
         params![],
     )
-        .with_context(|| "create index failed")?;
+    .with_context(|| "create index failed")?;
 
-    let is_text_dict = !file.ends_with(".mdd");
+    let is_text_dict = !file
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("mdd"));
     let mut fts_enabled = false;
     if is_text_dict {
         match conn.execute(
@@ -70,7 +91,10 @@ pub(crate) fn mdx_to_sqlite(file: &str) -> anyhow::Result<()> {
                 fts_enabled = true;
             }
             Err(e) => {
-                warn!("FTS5 not available, skipping MDX_FTS for {}: {}", file, e);
+                warn!(
+                    "FTS5 not available, skipping MDX_FTS for {:?}: {}",
+                    file, e
+                );
             }
         }
     }
@@ -101,7 +125,7 @@ pub(crate) fn mdx_to_sqlite(file: &str) -> anyhow::Result<()> {
                 r.block_csize,
                 r.block_dsize
             ])
-                .with_context(|| "insert MDX_INDEX table error")?;
+            .with_context(|| "insert MDX_INDEX table error")?;
 
             if let Some(ref mut fts_stmt) = fts_stmt {
                 if should_index_in_fts(&r.text) {

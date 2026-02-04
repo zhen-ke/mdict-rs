@@ -1,6 +1,6 @@
 use std::iter::Iterator;
 
-use rand::{rng, Rng};
+use rand::{Rng, rng};
 use std::sync::LazyLock;
 pub fn lucky_word() -> String {
     let random_index = rng().random_range(0..WORD_LIST.len());

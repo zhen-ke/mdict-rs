@@ -37,25 +37,33 @@ cargo fmt
 
 - **Indexing System** (`src/indexing/`): Converts MDX files to SQLite databases for efficient querying
   - Creates `.db` files alongside MDX files
-  - Tables: `MDX_INDEX(text, def)`
+  - Tables:
+    - `MDX_INDEX(text, record_offset, record_length, block_offset, block_size, block_dsize)`
+    - `MDX_FTS(text)` (optional, when FTS5 is available)
 
 - **Web Server** (`src/main.rs`, `src/handlers/`): Axum-based web server
   - `/query`: POST endpoint for dictionary lookups
   - `/lucky`: GET endpoint for random word lookup
-  - Static file serving from `resources/static/`
+  - Static file serving from detected static directory (see Configuration)
 
 - **Query System** (`src/query/`): Handles dictionary queries across multiple MDX files
-  - Searches through SQLite databases in order defined in config
+  - Searches through SQLite databases in scan order (MDX first; resources prefer MDD first)
 
 ### Configuration
 
-- **Dictionary Files**: Configured in `src/config/mod.rs` in `MDX_FILES` array
-- **Static Files**: Located in `resources/static/`
-- **MDX Files**: Located in `resources/mdx/` with language subdirectories
+- **Dictionary Files**: Scanned at startup from:
+  1. `MDX_DICT_DIR` environment variable (if set)
+  2. `mdict/` folder next to the binary
+  3. `mdict/` folder in current working directory
+- **Static Files**: Served from:
+  1. `static/` folder next to the binary
+  2. `static/` folder in current working directory
+  3. `resources/static/` (development)
+- **Per-dictionary config**: Optional TOML next to each `.mdx` (same filename, `.toml` extension)
 
 ### Data Flow
 
-1. Application starts and indexes all configured MDX files to SQLite databases
+1. Application starts, scans dictionaries, and ensures SQLite indexes exist
 2. Web server accepts queries via `/query` endpoint
 3. Query system searches through databases in configured order
 4. Results returned as plain text responses
@@ -72,10 +80,13 @@ cargo fmt
 
 ```
 resources/
-├── mdx/           # MDX dictionary files
-│   ├── en/        # English dictionaries
-│   └── zh/        # Chinese dictionaries
 └── static/        # Static files (CSS, etc.)
+
+mdict/             # Dictionary files (default runtime location)
+├── xxx.mdx
+├── xxx.mdx.db
+├── xxx.mdd
+└── xxx.mdd.db
 
 src/
 ├── config/        # Application configuration
@@ -90,7 +101,6 @@ src/
 ## Important Notes
 
 - The project uses Rust 2024 edition
-- MDX files must be placed in `resources/mdx/` with appropriate subdirectories
-- CSS files for MDX dictionaries should be placed in `resources/static/`
-- Indexing happens automatically on startup, creating `.db` files alongside MDX files
+- Dictionary files are scanned from `MDX_DICT_DIR` (if set) or `mdict/` near the binary / current working directory
+- Indexing happens automatically on startup, creating `.db` files alongside dictionary files
 - The application currently supports MDX version 2.0 with encryption levels 0 and 2

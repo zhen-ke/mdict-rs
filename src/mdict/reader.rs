@@ -1,12 +1,12 @@
-use std::path::Path;
 use std::fs::File;
 use std::num::NonZeroUsize;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use crate::mdict::recordblock::record_block_parser;
 use lru::LruCache;
 use memmap2::MmapOptions;
 use nom::Parser;
-use crate::mdict::recordblock::record_block_parser;
 
 const BLOCK_CACHE_SIZE: usize = 64;
 
@@ -44,7 +44,9 @@ impl MdxReader {
         if block_offset + block_csize > self.mmap.len() {
             return Err(anyhow::anyhow!(
                 "Block out of bounds: offset {} + size {} > file size {}",
-                block_offset, block_csize, self.mmap.len()
+                block_offset,
+                block_csize,
+                self.mmap.len()
             ));
         }
         let key = BlockKey {
@@ -76,9 +78,11 @@ impl MdxReader {
 
         // 边界检查
         if record_offset + record_length > block_decompressed.len() {
-             return Err(anyhow::anyhow!(
+            return Err(anyhow::anyhow!(
                 "Record out of bounds: offset {} + length {} > block size {}",
-                record_offset, record_length, block_decompressed.len()
+                record_offset,
+                record_length,
+                block_decompressed.len()
             ));
         }
 

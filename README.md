@@ -6,15 +6,24 @@ It's at an early stage of development, now only supports mdx version 2.0 with en
 
 ## usage
 
-1. put your mdx file in `resources/mdx/en` folder and add files in config `src/config/mod.rs`
-2. if your mdx file has a separate CSS file, put it in `resources/static/` folder
-3. run with:
+1. Put your `.mdx` / `.mdd` files into the `mdict/` folder (default), or set `MDX_DICT_DIR` to a directory containing them.
+2. (Optional) Add a per-dictionary config TOML next to the `.mdx` file, e.g. `mdict/foo.toml` for `mdict/foo.mdx`.
+3. Run with:
 
 ```bash
 cargo run --release
 # now open your chrome, and search
 # http://localhost:8181
 ```
+
+On first run, the server will build SQLite index files (`*.db`) next to the dictionary files for fast lookup.
+
+### Static files
+
+The web UI is served from (in order):
+1. `./static/` next to the binary
+2. `./static/` in the current working directory
+3. `resources/static/` (development)
 
 ## screenshot
 

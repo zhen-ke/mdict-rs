@@ -2,14 +2,19 @@ mod error;
 mod response;
 
 pub use error::AppError;
-use response::{ok_response, css_response, js_response, not_found};
+use response::{css_response, js_response, not_found, ok_response};
 
+use crate::app_state::AppState;
+use crate::config::DictInfo;
 use crate::lucky;
 use crate::query::{query, query_with_trace, suggest};
-use crate::config::{static_path, get_all_dict_info, get_dict_config, get_dict_directory, DictInfo};
 use serde_derive::Deserialize;
 
-use axum::{extract::{Form, Query}, response::{Response, Json}, http::Uri};
+use axum::{
+    extract::{Form, Query, State},
+    http::Uri,
+    response::{Json, Response},
+};
 use tokio::fs;
 
 #[derive(Deserialize, Debug)]
@@ -22,29 +27,38 @@ pub struct QueryForm {
     word: String,
 }
 
-pub(crate) async fn handle_query(Form(params): Form<QueryForm>) -> Result<Response, AppError> {
+pub(crate) async fn handle_query(
+    State(state): State<AppState>,
+    Form(params): Form<QueryForm>,
+) -> Result<Response, AppError> {
     let word = params.word;
     tracing::info!("Processing query for word: {}", word);
-    let result = tokio::task::spawn_blocking(move || query(word))
+    let state = state.clone();
+    let result = tokio::task::spawn_blocking(move || query(&state, word))
         .await
         .map_err(|e| AppError::Internal(format!("query task failed: {}", e)))?;
     let (data, content_type) = result.map_err(AppError::from)?;
     Ok(ok_response(data, &content_type))
 }
 
-pub(crate) async fn handle_lucky() -> Result<Response, AppError> {
+pub(crate) async fn handle_lucky(State(state): State<AppState>) -> Result<Response, AppError> {
     let word = lucky::lucky_word();
     tracing::info!("Lucky query for word: {}", word);
-    let result = tokio::task::spawn_blocking(move || query(word))
+    let state = state.clone();
+    let result = tokio::task::spawn_blocking(move || query(&state, word))
         .await
         .map_err(|e| AppError::Internal(format!("query task failed: {}", e)))?;
     let (data, content_type) = result.map_err(AppError::from)?;
     Ok(ok_response(data, &content_type))
 }
 
-pub(crate) async fn handle_suggest(Query(params): Query<SuggestQuery>) -> Json<Vec<String>> {
+pub(crate) async fn handle_suggest(
+    State(state): State<AppState>,
+    Query(params): Query<SuggestQuery>,
+) -> Json<Vec<String>> {
     let q = params.q;
-    let result = tokio::task::spawn_blocking(move || suggest(q, 10)).await;
+    let state = state.clone();
+    let result = tokio::task::spawn_blocking(move || suggest(&state, q, 10)).await;
     match result {
         Ok(Ok(suggestions)) => Json(suggestions),
         Ok(Err(e)) => {
@@ -59,10 +73,14 @@ pub(crate) async fn handle_suggest(Query(params): Query<SuggestQuery>) -> Json<V
 }
 
 /// Debug endpoint to show @@@LINK redirect chain
-/// Usage: GET /trace?word=whams
-pub(crate) async fn handle_trace(Query(params): Query<SuggestQuery>) -> Json<serde_json::Value> {
+/// Usage: GET /trace?q=whams
+pub(crate) async fn handle_trace(
+    State(state): State<AppState>,
+    Query(params): Query<SuggestQuery>,
+) -> Json<serde_json::Value> {
     let q = params.q;
-    let result = tokio::task::spawn_blocking(move || query_with_trace(q)).await;
+    let state = state.clone();
+    let result = tokio::task::spawn_blocking(move || query_with_trace(&state, q)).await;
     match result {
         Ok(Ok((chain, final_word))) => Json(serde_json::json!({
             "chain": chain,
@@ -78,47 +96,46 @@ pub(crate) async fn handle_trace(Query(params): Query<SuggestQuery>) -> Json<ser
     }
 }
 
-pub(crate) async fn handle_resource(uri: Uri) -> Response {
+pub(crate) async fn handle_resource(State(state): State<AppState>, uri: Uri) -> Response {
     let path = uri.path();
     let key = path.replace("/", "\\"); // standard mdict key starts with \ e.g. \img\foo.png
 
     // 1. Try to find in file system (Static Resources)
-    if let Ok(base_static_dir) = static_path() {
-        let relative_path = path.trim_start_matches('/');
+    let base_static_dir = state.static_dir().to_path_buf();
+    let relative_path = path.trim_start_matches('/');
 
-        // Security: Reject paths with directory traversal patterns
-        if relative_path.contains("..") {
-            tracing::warn!("Rejected path traversal attempt: {}", path);
-            return not_found();
-        }
+    // Security: Reject paths with directory traversal patterns
+    if relative_path.contains("..") {
+        tracing::warn!("Rejected path traversal attempt: {}", path);
+        return not_found();
+    }
 
-        let mut static_dir = base_static_dir.clone();
-        if relative_path.is_empty() || relative_path.ends_with('/') {
-            static_dir.push(relative_path);
-            static_dir.push("index.html");
-        } else {
-            static_dir.push(relative_path);
-        }
+    let mut static_file = base_static_dir.clone();
+    if relative_path.is_empty() || relative_path.ends_with('/') {
+        static_file.push(relative_path);
+        static_file.push("index.html");
+    } else {
+        static_file.push(relative_path);
+    }
 
-        // Security: Verify the final path is within static directory
-        if let Ok(canonical) = static_dir.canonicalize() {
-            if let Ok(base_canonical) = base_static_dir.canonicalize() {
-                if !canonical.starts_with(&base_canonical) {
-                    tracing::warn!("Path escape attempt blocked: {:?}", static_dir);
-                    return not_found();
-                }
+    // Security: Verify the final path is within static directory
+    if let Ok(canonical) = static_file.canonicalize() {
+        if let Ok(base_canonical) = base_static_dir.canonicalize() {
+            if !canonical.starts_with(&base_canonical) {
+                tracing::warn!("Path escape attempt blocked: {:?}", static_file);
+                return not_found();
             }
         }
+    }
 
-        if static_dir.exists() && static_dir.is_file() {
-            match fs::read(&static_dir).await {
-                Ok(bytes) => {
-                    let mime_type = mime_guess::from_path(&static_dir).first_or_octet_stream();
-                    return ok_response(bytes, mime_type.as_ref());
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to read static file {:?}: {}", static_dir, e);
-                }
+    if static_file.exists() && static_file.is_file() {
+        match fs::read(&static_file).await {
+            Ok(bytes) => {
+                let mime_type = mime_guess::from_path(&static_file).first_or_octet_stream();
+                return ok_response(bytes, mime_type.as_ref());
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read static file {:?}: {}", static_file, e);
             }
         }
     }
@@ -130,10 +147,11 @@ pub(crate) async fn handle_resource(uri: Uri) -> Response {
         path.trim_start_matches('/').to_string(), // img/foo.png
     ];
 
+    let state = state.clone();
     let result = tokio::task::spawn_blocking(move || {
         for candidate in candidates {
             tracing::debug!("resource try key: {}", candidate);
-            if let Ok((data, content_type)) = query(candidate) {
+            if let Ok((data, content_type)) = query(&state, candidate) {
                 return Some(ok_response(data, &content_type));
             }
         }
@@ -159,17 +177,21 @@ pub struct DictQuery {
 }
 
 /// GET /api/dicts - Get list of all dictionaries with their configs
-pub(crate) async fn handle_dict_list() -> Json<Vec<DictInfo>> {
-    Json(get_all_dict_info())
+pub(crate) async fn handle_dict_list(State(state): State<AppState>) -> Json<Vec<DictInfo>> {
+    Json(state.get_all_dict_info())
 }
 
 /// GET /api/dict/style?id=xxx - Get custom CSS for a dictionary
-pub(crate) async fn handle_dict_style(Query(params): Query<DictQuery>) -> Result<Response, AppError> {
-    let id = params.id.ok_or_else(|| AppError::BadRequest("Missing 'id' parameter".to_string()))?;
+pub(crate) async fn handle_dict_style(
+    State(state): State<AppState>,
+    Query(params): Query<DictQuery>,
+) -> Result<Response, AppError> {
+    let id = params
+        .id
+        .ok_or_else(|| AppError::BadRequest("Missing 'id' parameter".to_string()))?;
 
-    if let Some(config) = get_dict_config(&id) {
-        let dict_dir = get_dict_directory();
-        let css_content = config.get_css_content(&dict_dir);
+    if let Some(config) = state.get_dict_config(&id) {
+        let css_content = config.get_css_content(state.dict_dir());
         return Ok(css_response(css_content));
     }
 
@@ -178,12 +200,16 @@ pub(crate) async fn handle_dict_style(Query(params): Query<DictQuery>) -> Result
 }
 
 /// GET /api/dict/script?id=xxx - Get custom JavaScript for a dictionary
-pub(crate) async fn handle_dict_script(Query(params): Query<DictQuery>) -> Result<Response, AppError> {
-    let id = params.id.ok_or_else(|| AppError::BadRequest("Missing 'id' parameter".to_string()))?;
+pub(crate) async fn handle_dict_script(
+    State(state): State<AppState>,
+    Query(params): Query<DictQuery>,
+) -> Result<Response, AppError> {
+    let id = params
+        .id
+        .ok_or_else(|| AppError::BadRequest("Missing 'id' parameter".to_string()))?;
 
-    if let Some(config) = get_dict_config(&id) {
-        let dict_dir = get_dict_directory();
-        let js_content = config.get_js_content(&dict_dir);
+    if let Some(config) = state.get_dict_config(&id) {
+        let js_content = config.get_js_content(state.dict_dir());
         return Ok(js_response(js_content));
     }
 

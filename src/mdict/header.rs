@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use adler32::adler32;
 use anyhow::{Context, bail};
 use encoding::{Encoding, all::UTF_16LE};
+use nom::Parser;
 use nom::multi::length_data;
 use nom::number::complete::{be_u32, le_u32};
-use nom::Parser;
 use regex::Regex;
 use tracing::info;
 
@@ -32,15 +32,14 @@ pub struct Header {
 /// Parse header using nom, but return anyhow::Result for better error handling
 pub fn parse_header(data: &[u8]) -> anyhow::Result<(&[u8], Header)> {
     // Use nom to parse length-prefixed data
-    let (data, (header_buf, checksum)) = (length_data(be_u32), le_u32)
-        .parse(data)
-        .map_err(|e: nom::Err<nom::error::Error<&[u8]>>| {
+    let (data, (header_buf, checksum)) = (length_data(be_u32), le_u32).parse(data).map_err(
+        |e: nom::Err<nom::error::Error<&[u8]>>| {
             anyhow::anyhow!("Failed to parse header length/checksum: {:?}", e)
-        })?;
+        },
+    )?;
 
     // Verify checksum
-    let computed_checksum = adler32(header_buf)
-        .context("Failed to compute adler32 checksum")?;
+    let computed_checksum = adler32(header_buf).context("Failed to compute adler32 checksum")?;
     if computed_checksum != checksum {
         bail!(
             "Header checksum mismatch: computed {} != expected {}",
@@ -55,8 +54,7 @@ pub fn parse_header(data: &[u8]) -> anyhow::Result<(&[u8], Header)> {
         .map_err(|e| anyhow::anyhow!("Failed to decode header as UTF-16LE: {}", e))?;
 
     // Parse header attributes
-    let re = Regex::new(r#"(\w+)="((.|\r\n|[\r\n])*?)""#)
-        .context("Failed to compile regex")?;
+    let re = Regex::new(r#"(\w+)="((.|\r\n|[\r\n])*?)""#).context("Failed to compile regex")?;
     let mut attrs = HashMap::new();
     for cap in re.captures_iter(info.as_str()) {
         attrs.insert(cap[1].to_string(), cap[2].to_string());
@@ -86,12 +84,14 @@ pub fn parse_header(data: &[u8]) -> anyhow::Result<(&[u8], Header)> {
     };
 
     // "0" "2" "3" - MDD 文件也可能没有 Encrypted 属性
-    let encrypted = attrs.get("Encrypted")
+    let encrypted = attrs
+        .get("Encrypted")
         .map(|s| s.to_string())
         .unwrap_or_else(|| "No".to_string());
 
     // "UTF-8" - MDD 文件（二进制资源）通常没有 Encoding 属性
-    let encoding = attrs.get("Encoding")
+    let encoding = attrs
+        .get("Encoding")
         .map(|s| s.to_string())
         .unwrap_or_else(|| "".to_string());
 

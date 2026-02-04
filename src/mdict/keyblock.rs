@@ -4,6 +4,8 @@ use crate::util::text_len_parser_v1;
 use crate::util::text_len_parser_v2;
 use crate::util::text_len_parser_v2_utf16;
 use adler32::adler32;
+use encoding::Encoding;
+use encoding::all::{UTF_8, UTF_16LE};
 use encoding::label::encoding_from_whatwg_label;
 use flate2::read::ZlibDecoder;
 use nom::{
@@ -11,10 +13,11 @@ use nom::{
     bytes::complete::{take, take_till},
     combinator::map,
     multi::{length_data, many0},
-    number::complete::{be_u32, be_u64, le_u32},
+    number::complete::{be_u32, be_u64},
 };
 use ripemd::{Digest, Ripemd128};
-use std::{io::Read, str};
+use std::io::Read;
+use tracing::warn;
 
 pub struct KeyBlockHeader {
     #[allow(unused)]
@@ -75,7 +78,18 @@ pub fn parse_key_block_header<'a>(
         let (data, checksum) = be_u32(data)?;
 
         // checksum info_buf
-        assert_eq!(adler32(info_buf).unwrap(), checksum);
+        let computed = adler32(info_buf).map_err(|_| {
+            nom::Err::Failure(nom::error::Error::new(
+                info_buf,
+                nom::error::ErrorKind::Verify,
+            ))
+        })?;
+        if computed != checksum {
+            return Err(nom::Err::Failure(nom::error::Error::new(
+                info_buf,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
         let (_, kbh) = map(
             (be_u64, be_u64, be_u64, be_u64, be_u64),
             |(
@@ -110,7 +124,7 @@ pub fn parse_key_block_info<'a>(
 
     fn v1(data: &[u8], block_info_len: usize) -> IResult<&[u8], Vec<KeyBlockSize>> {
         let (data, block_info) = take(block_info_len)(data)?;
-        let key_blocks_size = decode_key_blocks_size_v1(block_info);
+        let (_, key_blocks_size) = decode_key_blocks_size_v1(block_info)?;
         Ok((data, key_blocks_size))
     }
 
@@ -121,7 +135,18 @@ pub fn parse_key_block_info<'a>(
         encoding: &str,
     ) -> IResult<&'a [u8], Vec<KeyBlockSize>> {
         let (data, block_info) = take(block_info_len)(data)?;
-        assert_eq!(&block_info[0..4], b"\x02\x00\x00\x00");
+        if block_info.len() < 8 {
+            return Err(nom::Err::Failure(nom::error::Error::new(
+                block_info,
+                nom::error::ErrorKind::LengthValue,
+            )));
+        }
+        if &block_info[0..4] != b"\x02\x00\x00\x00" {
+            return Err(nom::Err::Failure(nom::error::Error::new(
+                block_info,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
 
         let mut key_block_info = vec![];
 
@@ -129,9 +154,13 @@ pub fn parse_key_block_info<'a>(
         if encrypted == "0" || encrypted.eq_ignore_ascii_case("no") || encrypted.is_empty() {
             ZlibDecoder::new(&block_info[8..])
                 .read_to_end(&mut key_block_info)
-                .unwrap();
+                .map_err(|_| {
+                    nom::Err::Failure(nom::error::Error::new(
+                        block_info,
+                        nom::error::ErrorKind::Fail,
+                    ))
+                })?;
         }
-
         // decrypt: encrypted 为 "2" 或 "3" 表示加密
         else if encrypted == "2" || encrypted == "3" {
             let mut md = Ripemd128::new();
@@ -145,22 +174,45 @@ pub fn parse_key_block_info<'a>(
             d.extend(decrypted);
             ZlibDecoder::new(&d[8..])
                 .read_to_end(&mut key_block_info)
-                .unwrap();
+                .map_err(|_| {
+                    nom::Err::Failure(nom::error::Error::new(
+                        block_info,
+                        nom::error::ErrorKind::Fail,
+                    ))
+                })?;
+        } else {
+            // Unknown encryption flag
+            return Err(nom::Err::Failure(nom::error::Error::new(
+                block_info,
+                nom::error::ErrorKind::Verify,
+            )));
         }
 
         // MDD 文件的 encoding 为空字符串，使用 UTF-16LE 编码
         // 对于 UTF-16，text length 字段是字符数，需要 * 2 得到字节数
-        let is_utf16 = encoding.is_empty() || encoding.eq_ignore_ascii_case("utf-16");
+        let is_utf16 = encoding.is_empty() || encoding.to_ascii_lowercase().contains("utf-16");
         let key_blocks_size = if is_utf16 {
-            decode_key_blocks_size_v2_utf16(&key_block_info[..])
+            let (_, res) = decode_key_blocks_size_v2_utf16(&key_block_info[..]).map_err(|_| {
+                nom::Err::Failure(nom::error::Error::new(
+                    block_info,
+                    nom::error::ErrorKind::Fail,
+                ))
+            })?;
+            res
         } else {
-            decode_key_blocks_size_v2(&key_block_info[..])
+            let (_, res) = decode_key_blocks_size_v2(&key_block_info[..]).map_err(|_| {
+                nom::Err::Failure(nom::error::Error::new(
+                    block_info,
+                    nom::error::ErrorKind::Fail,
+                ))
+            })?;
+            res
         };
         Ok((data, key_blocks_size))
     }
 
     /// number of entries, num of bytes, first, num of bytes, last?
-    fn decode_key_blocks_size_v1(block_info: &[u8]) -> Vec<KeyBlockSize> {
+    fn decode_key_blocks_size_v1(block_info: &[u8]) -> IResult<&[u8], Vec<KeyBlockSize>> {
         let mut parser = many0(map(
             (
                 be_u32,
@@ -174,23 +226,33 @@ pub fn parse_key_block_info<'a>(
                 dsize: dsize as usize,
             },
         ));
-        let (remain, res) = parser.parse(block_info).unwrap();
-        assert_eq!(
-            remain.len(),
-            0,
-            "failed: key block info parser left some data"
-        );
-        res
+        let (remain, res) = parser.parse(block_info)?;
+        if !remain.is_empty() {
+            return Err(nom::Err::Failure(nom::error::Error::new(
+                remain,
+                nom::error::ErrorKind::Eof,
+            )));
+        }
+        Ok((remain, res))
     }
 
-    fn decode_key_blocks_size_v2(block_info: &[u8]) -> Vec<KeyBlockSize> {
+    fn decode_key_blocks_size_v2(block_info: &[u8]) -> IResult<&[u8], Vec<KeyBlockSize>> {
         use tracing::debug;
-        debug!("decode_key_blocks_size_v2: block_info len = {}", block_info.len());
+        debug!(
+            "decode_key_blocks_size_v2: block_info len = {}",
+            block_info.len()
+        );
         if block_info.len() < 10 {
             debug!("block_info too short, returning empty");
-            return vec![];
+            return Err(nom::Err::Failure(nom::error::Error::new(
+                block_info,
+                nom::error::ErrorKind::LengthValue,
+            )));
         }
-        debug!("block_info first 16 bytes: {:02x?}", &block_info[..std::cmp::min(16, block_info.len())]);
+        debug!(
+            "block_info first 16 bytes: {:02x?}",
+            &block_info[..std::cmp::min(16, block_info.len())]
+        );
 
         let mut parser = many0(map(
             (
@@ -206,32 +268,44 @@ pub fn parse_key_block_info<'a>(
             },
         ));
 
-        match parser.parse(block_info) {
-            Ok((remain, res)) => {
-                debug!("parsed {} key blocks, remain len = {}", res.len(), remain.len());
-                if remain.len() != 0 {
-                    debug!("warning: remain bytes = {:02x?}", &remain[..std::cmp::min(32, remain.len())]);
-                }
-                res
-            }
-            Err(e) => {
-                debug!("parse error: {:?}", e);
-                // 返回空向量，让程序继续执行
-                vec![]
-            }
+        let (remain, res) = parser.parse(block_info)?;
+        debug!(
+            "parsed {} key blocks, remain len = {}",
+            res.len(),
+            remain.len()
+        );
+        if !remain.is_empty() {
+            debug!(
+                "warning: remain bytes = {:02x?}",
+                &remain[..std::cmp::min(32, remain.len())]
+            );
+            return Err(nom::Err::Failure(nom::error::Error::new(
+                remain,
+                nom::error::ErrorKind::Eof,
+            )));
         }
+        Ok((remain, res))
     }
 
     /// UTF-16 版本的 key block info 解析器，用于 MDD 文件
     /// 文本长度字段是字符数，需要 * 2 得到字节数
-    fn decode_key_blocks_size_v2_utf16(block_info: &[u8]) -> Vec<KeyBlockSize> {
+    fn decode_key_blocks_size_v2_utf16(block_info: &[u8]) -> IResult<&[u8], Vec<KeyBlockSize>> {
         use tracing::debug;
-        debug!("decode_key_blocks_size_v2_utf16: block_info len = {}", block_info.len());
+        debug!(
+            "decode_key_blocks_size_v2_utf16: block_info len = {}",
+            block_info.len()
+        );
         if block_info.len() < 10 {
             debug!("block_info too short, returning empty");
-            return vec![];
+            return Err(nom::Err::Failure(nom::error::Error::new(
+                block_info,
+                nom::error::ErrorKind::LengthValue,
+            )));
         }
-        debug!("block_info first 16 bytes: {:02x?}", &block_info[..std::cmp::min(16, block_info.len())]);
+        debug!(
+            "block_info first 16 bytes: {:02x?}",
+            &block_info[..std::cmp::min(16, block_info.len())]
+        );
 
         let mut parser = many0(map(
             (
@@ -247,19 +321,23 @@ pub fn parse_key_block_info<'a>(
             },
         ));
 
-        match parser.parse(block_info) {
-            Ok((remain, res)) => {
-                debug!("parsed {} key blocks (utf16), remain len = {}", res.len(), remain.len());
-                if remain.len() != 0 {
-                    debug!("warning: remain bytes = {:02x?}", &remain[..std::cmp::min(32, remain.len())]);
-                }
-                res
-            }
-            Err(e) => {
-                debug!("parse error (utf16): {:?}", e);
-                vec![]
-            }
+        let (remain, res) = parser.parse(block_info)?;
+        debug!(
+            "parsed {} key blocks (utf16), remain len = {}",
+            res.len(),
+            remain.len()
+        );
+        if !remain.is_empty() {
+            debug!(
+                "warning: remain bytes = {:02x?}",
+                &remain[..std::cmp::min(32, remain.len())]
+            );
+            return Err(nom::Err::Failure(nom::error::Error::new(
+                remain,
+                nom::error::ErrorKind::Eof,
+            )));
         }
+        Ok((remain, res))
     }
 }
 
@@ -276,12 +354,25 @@ pub fn parse_key_blocks<'a>(
     let mut key_entries: Vec<RecordDeBufOffset> = vec![];
 
     for block_size in key_blocks_size.iter() {
-        let (remain, decompressed) =
-            key_block_parser(block_size.csize, block_size.dsize).parse(buf)?;
-        let (_, mut one_block_entries) = match &header.version {
-            Version::V1 => parse_block_items_v1(&decompressed[..], &header.encoding).unwrap(),
-            Version::V2 => parse_block_items_v2(&decompressed[..], &header.encoding).unwrap(),
+        let (remain, decompressed) = key_block_parser(buf, block_size.csize, block_size.dsize)?;
+        let (unconsumed, mut one_block_entries) = match &header.version {
+            Version::V1 => {
+                parse_block_items_v1(&decompressed[..], &header.encoding).map_err(|_| {
+                    nom::Err::Failure(nom::error::Error::new(buf, nom::error::ErrorKind::Fail))
+                })?
+            }
+            Version::V2 => {
+                parse_block_items_v2(&decompressed[..], &header.encoding).map_err(|_| {
+                    nom::Err::Failure(nom::error::Error::new(buf, nom::error::ErrorKind::Fail))
+                })?
+            }
         };
+        if !unconsumed.is_empty() {
+            warn!(
+                "key block items parser left {} bytes unconsumed",
+                unconsumed.len()
+            );
+        }
 
         buf = remain;
         key_entries.append(&mut one_block_entries);
@@ -296,14 +387,19 @@ fn parse_block_items_v1<'a>(
     encoding: &str,
 ) -> IResult<&'a [u8], Vec<RecordDeBufOffset>> {
     // MDD 文件的 encoding 为空，使用 UTF-16LE
-    let actual_encoding = if encoding.is_empty() { "utf-16le" } else { encoding };
+    let actual_encoding = if encoding.is_empty() {
+        "utf-16le"
+    } else {
+        encoding
+    };
 
     let (remain, entries) = many0(map(
         (be_u32, take_till(|x| x == 0), take(1_usize)),
         |(offset, buf, _)| {
-            let decoder = encoding_from_whatwg_label(actual_encoding)
-                .expect(&format!("unknown encoding: {}", actual_encoding));
-            let text = decoder.decode(buf, encoding::DecoderTrap::Ignore).unwrap_or_default();
+            let decoder = encoding_from_whatwg_label(actual_encoding).unwrap_or(UTF_8);
+            let text = decoder
+                .decode(buf, encoding::DecoderTrap::Ignore)
+                .unwrap_or_default();
             RecordDeBufOffset {
                 record_offset_in_debuf: offset as usize,
                 text,
@@ -311,8 +407,6 @@ fn parse_block_items_v1<'a>(
         },
     ))
     .parse(data)?;
-
-    assert_eq!(remain.len(), 0);
 
     Ok((remain, entries))
 }
@@ -322,7 +416,11 @@ fn parse_block_items_v2<'a>(
     encoding: &str,
 ) -> IResult<&'a [u8], Vec<RecordDeBufOffset>> {
     // MDD 文件的 encoding 为空，使用 UTF-16LE
-    let actual_encoding = if encoding.is_empty() { "utf-16le" } else { encoding };
+    let actual_encoding = if encoding.is_empty() {
+        "utf-16le"
+    } else {
+        encoding
+    };
     let is_utf16 = actual_encoding.to_lowercase().contains("utf-16");
 
     // UTF-16 编码使用 2 字节的 null terminator (\x00\x00)
@@ -338,8 +436,14 @@ fn parse_block_items_v2<'a>(
         while remaining.len() >= 8 {
             // 读取 8 字节的 offset
             let offset = u64::from_be_bytes([
-                remaining[0], remaining[1], remaining[2], remaining[3],
-                remaining[4], remaining[5], remaining[6], remaining[7],
+                remaining[0],
+                remaining[1],
+                remaining[2],
+                remaining[3],
+                remaining[4],
+                remaining[5],
+                remaining[6],
+                remaining[7],
             ]) as usize;
             remaining = &remaining[8..];
 
@@ -362,9 +466,8 @@ fn parse_block_items_v2<'a>(
             remaining = &remaining[end_pos + 2..]; // 跳过 2 字节的 null terminator
 
             // 解码 UTF-16LE
-            let decoder = encoding_from_whatwg_label("utf-16le")
-                .expect("utf-16le encoding not found");
-            let text = decoder.decode(text_buf, encoding::DecoderTrap::Ignore)
+            let text = UTF_16LE
+                .decode(text_buf, encoding::DecoderTrap::Ignore)
                 .unwrap_or_default();
 
             entries.push(RecordDeBufOffset {
@@ -379,9 +482,10 @@ fn parse_block_items_v2<'a>(
         let (remain, sep) = many0(map(
             (be_u64, take_till(|x| x == 0), take(1_usize)),
             |(offset, buf, _end_zero)| {
-                let decoder = encoding_from_whatwg_label(actual_encoding)
-                    .expect(&format!("unknown encoding: {}", actual_encoding));
-                let text = decoder.decode(buf, encoding::DecoderTrap::Ignore).unwrap_or_default();
+                let decoder = encoding_from_whatwg_label(actual_encoding).unwrap_or(UTF_8);
+                let text = decoder
+                    .decode(buf, encoding::DecoderTrap::Ignore)
+                    .unwrap_or_default();
                 RecordDeBufOffset {
                     record_offset_in_debuf: offset as usize,
                     text,
@@ -390,54 +494,78 @@ fn parse_block_items_v2<'a>(
         ))
         .parse(data)?;
 
-        assert_eq!(remain.len(), 0);
-
         Ok((remain, sep))
     }
 }
 
 /// 解析一个 key block 得到的是bytes
-fn key_block_parser<'a>(
-    csize: usize,
-    dsize: usize,
-) -> impl Parser<&'a [u8], Output = Vec<u8>, Error = nom::error::Error<&'a [u8]>> {
-    map(
-        (le_u32, take(4_usize), take(csize - 8)),
-        move |(enc, checksum, encrypted_buf)| {
-            let enc_method = (enc >> 4) & 0xf;
-            let comp_method = enc & 0xf;
+fn key_block_parser<'a>(input: &'a [u8], csize: usize, dsize: usize) -> IResult<&'a [u8], Vec<u8>> {
+    if csize < 8 {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::LengthValue,
+        )));
+    }
 
-            let mut md = Ripemd128::new();
-            md.update(checksum);
-            let key = md.finalize();
-            // todo: 这一段好像和结构图中不太一样
-            let data: Vec<u8> = match enc_method {
-                0 => Vec::from(encrypted_buf),
-                1 => fast_decrypt(encrypted_buf, key.as_slice()),
-                2 => {
-                    let decrypt = vec![];
-                    decrypt
-                }
-                _ => panic!("unknown enc method: {}", enc_method),
-            };
+    if input.len() < csize {
+        return Err(nom::Err::Incomplete(nom::Needed::new(csize - input.len())));
+    }
 
-            let decompressed = match comp_method {
-                0 => data,
-                1 => {
-                    let mut comp: Vec<u8> = vec![0xf0];
-                    comp.extend_from_slice(&data[..]);
-                    let lzo = minilzo_rs::LZO::init().unwrap();
-                    lzo.decompress(&data[..], dsize).unwrap()
-                }
-                2 => {
-                    let mut v = vec![];
-                    ZlibDecoder::new(&data[..]).read_to_end(&mut v).unwrap();
-                    v
-                }
-                _ => panic!("unknown compression method: {}", comp_method),
-            };
+    let (block, remain) = input.split_at(csize);
+    let enc = u32::from_le_bytes([block[0], block[1], block[2], block[3]]);
+    let checksum = &block[4..8];
+    let encrypted_buf = &block[8..];
 
-            decompressed
-        },
-    )
+    let enc_method = (enc >> 4) & 0xf;
+    let comp_method = enc & 0xf;
+
+    let mut md = Ripemd128::new();
+    md.update(checksum);
+    let key = md.finalize();
+
+    let data: Vec<u8> = match enc_method {
+        0 => encrypted_buf.to_vec(),
+        1 => fast_decrypt(encrypted_buf, key.as_slice()),
+        2 => {
+            return Err(nom::Err::Failure(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+        _ => {
+            return Err(nom::Err::Failure(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+    };
+
+    let decompressed = match comp_method {
+        0 => data,
+        1 => {
+            let lzo = minilzo_rs::LZO::init().map_err(|_| {
+                nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
+            })?;
+            lzo.decompress(&data[..], dsize).map_err(|_| {
+                nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
+            })?
+        }
+        2 => {
+            let mut v = vec![];
+            ZlibDecoder::new(&data[..])
+                .read_to_end(&mut v)
+                .map_err(|_| {
+                    nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
+                })?;
+            v
+        }
+        _ => {
+            return Err(nom::Err::Failure(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+    };
+
+    Ok((remain, decompressed))
 }

@@ -36,8 +36,8 @@ impl DictConfig {
     /// Load config from a .toml file alongside the MDX file
     ///
     /// For `mdict/dict.mdx`, looks for `mdict/dict.toml`
-    pub fn load(mdx_path: &str) -> Option<Self> {
-        let mdx_path = Path::new(mdx_path);
+    pub fn load(mdx_path: impl AsRef<Path>) -> Option<Self> {
+        let mdx_path = mdx_path.as_ref();
 
         // Get the config file path (same name, .toml extension)
         let config_path = mdx_path.with_extension("toml");
@@ -47,18 +47,16 @@ impl DictConfig {
         }
 
         match fs::read_to_string(&config_path) {
-            Ok(content) => {
-                match toml::from_str::<DictConfig>(&content) {
-                    Ok(config) => {
-                        info!("Loaded dict config: {:?}", config_path);
-                        Some(config)
-                    }
-                    Err(e) => {
-                        warn!("Failed to parse dict config {:?}: {}", config_path, e);
-                        None
-                    }
+            Ok(content) => match toml::from_str::<DictConfig>(&content) {
+                Ok(config) => {
+                    info!("Loaded dict config: {:?}", config_path);
+                    Some(config)
                 }
-            }
+                Err(e) => {
+                    warn!("Failed to parse dict config {:?}: {}", config_path, e);
+                    None
+                }
+            },
             Err(e) => {
                 warn!("Failed to read dict config {:?}: {}", config_path, e);
                 None
@@ -103,12 +101,13 @@ impl DictConfig {
     }
 
     /// Get display name, falling back to MDX filename
-    pub fn get_display_name(&self, mdx_path: &str) -> String {
+    pub fn get_display_name(&self, mdx_path: impl AsRef<Path>) -> String {
+        let mdx_path = mdx_path.as_ref();
         if let Some(ref name) = self.name {
             name.clone()
         } else {
             // Extract filename without extension
-            Path::new(mdx_path)
+            mdx_path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("Unknown")
@@ -153,7 +152,7 @@ mod tests {
     #[test]
     fn test_get_display_name_fallback() {
         let config = DictConfig::default();
-        let name = config.get_display_name("/path/to/朗文词典.mdx");
+        let name = config.get_display_name(Path::new("/path/to/朗文词典.mdx"));
         assert_eq!(name, "朗文词典");
     }
 }
