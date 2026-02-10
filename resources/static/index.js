@@ -311,6 +311,14 @@ function escapeRegExp(string) {
     return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function safeDecodeURIComponent(value) {
+    try {
+        return decodeURIComponent(value);
+    } catch (_) {
+        return value;
+    }
+}
+
 // 分享链接功能
 $(document).on('click', '#share-btn', function(e) {
     e.preventDefault();
@@ -404,6 +412,57 @@ function queryMdx(word, updateHistory = true) {
             }
         }
     });
+}
+
+function queryDictEntryByUrl(url, word) {
+    if (!url) return;
+
+    currentQuery = word || currentQuery;
+    showLoading();
+    hideHistoryDropdown();
+    hideSuggestions();
+
+    $.ajax({
+        url: url,
+        type: 'GET',
+        dataType: 'html',
+        success: function (data) {
+            if (data && data.trim() !== '' && !data.includes('not found')) {
+                if (word) {
+                    saveHistory(word);
+                    updateUrl(word, true);
+                    $('#word').val(word);
+                    document.title = word + ' - MDict 极速词典';
+                }
+
+                let highlighted = highlightSearchTerm(data, currentQuery);
+                $('#mdx-resp').html(highlighted).show();
+                $('#share-btn').show();
+            } else {
+                showEmpty();
+            }
+        },
+        error: function(xhr) {
+            if (xhr.status === 404) {
+                showEmpty();
+            } else {
+                showError('词条跳转失败，请稍后重试');
+            }
+        }
+    });
+}
+
+function playAudioUrl(audioPath) {
+    if (!audioPath) return;
+
+    let audio = document.getElementById('mdict-audio');
+    if (!audio) {
+        audio = document.createElement('audio');
+        audio.id = 'mdict-audio';
+        document.body.appendChild(audio);
+    }
+    audio.src = audioPath;
+    audio.play().catch(err => console.error('Audio play failed:', err));
 }
 
 function postQuery() {
@@ -554,29 +613,78 @@ $(document).on('keydown', '#word', function(e) {
 // =============================================
 $(document).on('click', 'a', function (e) {
     let href = $(this).attr('href');
+    if (!href) return;
 
-    // 处理 sound:// 协议的音频播放
-    if (href && href.startsWith('sound://')) {
+    // 兼容旧 sound:// 协议
+    if (href.startsWith('sound://')) {
         e.preventDefault();
         let audioPath = href.replace('sound://', '/');
-
-        let audio = document.getElementById('mdict-audio');
-        if (!audio) {
-            audio = document.createElement('audio');
-            audio.id = 'mdict-audio';
-            document.body.appendChild(audio);
-        }
-        audio.src = audioPath;
-        audio.play().catch(err => console.error('Audio play failed:', err));
+        playAudioUrl(audioPath);
         return;
     }
 
-    // 词典内部链接
-    if (href && href.startsWith('/') && !href.startsWith('/#')) {
+    // 兼容旧 entry:// 协议
+    if (href.startsWith('entry://')) {
         e.preventDefault();
-        let word = href.slice(1);
+        let word = safeDecodeURIComponent(href.slice('entry://'.length));
+        if (word) {
+            $('#word').val(word);
+            queryMdx(word);
+        }
+        return;
+    }
+
+    let url;
+    try {
+        url = new URL(href, window.location.origin);
+    } catch (_) {
+        return;
+    }
+
+    if (url.origin !== window.location.origin) {
+        return;
+    }
+
+    const path = url.pathname;
+    const pathAndQuery = url.pathname + url.search + url.hash;
+
+    // 新路由: /dict/{id}/entry/{word}
+    const dictEntryMatch = path.match(/^\/dict\/[^/]+\/entry\/(.+)$/);
+    if (dictEntryMatch) {
+        e.preventDefault();
+        let word = safeDecodeURIComponent(dictEntryMatch[1]);
         $('#word').val(word);
-        queryMdx(word);
+        queryDictEntryByUrl(pathAndQuery, word);
+        return;
+    }
+
+    // 新路由: /dict/{id}/audio/{path}
+    if (/^\/dict\/[^/]+\/audio\/.+/.test(path)) {
+        e.preventDefault();
+        playAudioUrl(pathAndQuery);
+        return;
+    }
+
+    // 旧路由音频兼容: /resource/{id}/{path}
+    if (/^\/resource\/[^/]+\/.+\.(mp3|wav|ogg|oga|flac|aac|m4a)$/i.test(path)) {
+        e.preventDefault();
+        playAudioUrl(pathAndQuery);
+        return;
+    }
+
+    // 新路由资源直接放行，不拦截
+    if (/^\/dict\/[^/]+\/res\/.+/.test(path)) {
+        return;
+    }
+
+    // 兼容旧内部词条链接: /word
+    if (path.startsWith('/') && !path.startsWith('/#') && !path.startsWith('/api/')) {
+        e.preventDefault();
+        let word = safeDecodeURIComponent(path.slice(1));
+        if (word) {
+            $('#word').val(word);
+            queryMdx(word);
+        }
     }
 });
 

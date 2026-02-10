@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -18,6 +18,10 @@ pub struct AppState {
 
     dict_configs: Arc<HashMap<PathBuf, DictConfig>>,
 
+    // Mapping between ID and File Path
+    pub dict_id_map: Arc<HashMap<String, Vec<PathBuf>>>,
+    pub path_to_id: Arc<HashMap<PathBuf, String>>,
+
     db_pools: Arc<Mutex<HashMap<PathBuf, Pool<SqliteConnectionManager>>>>,
     mdx_readers: Arc<Mutex<HashMap<PathBuf, Arc<MdxReader>>>>,
 }
@@ -26,17 +30,14 @@ impl AppState {
     pub fn new(dict_dir: PathBuf, static_dir: PathBuf, dict_files: Vec<PathBuf>) -> Self {
         let dict_text_files: Vec<PathBuf> = dict_files
             .iter()
-            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("mdx")))
+            .filter(|p| Self::is_mdx_file(p))
             .cloned()
             .collect();
 
         let mut mdd = Vec::new();
         let mut mdx = Vec::new();
         for file in &dict_files {
-            if file
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("mdd"))
-            {
+            if Self::is_mdd_file(file) {
                 mdd.push(file.clone());
             } else {
                 mdx.push(file.clone());
@@ -52,12 +53,36 @@ impl AppState {
             }
         }
 
+        // Initialize ID mappings
+        let mut dict_id_map: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        let mut path_to_id = HashMap::new();
+
+        // Generate IDs for all files
+        for file in &dict_files {
+            // Use file stem + parent path to identify "logical dictionary"
+            let file_stem = file.file_stem().unwrap_or_default();
+            let parent = file.parent().unwrap_or(Path::new(""));
+            let logical_path = parent.join(file_stem);
+
+            let path_str = logical_path.to_string_lossy().to_string().to_lowercase();
+            let hash = adler32::adler32(path_str.as_bytes()).unwrap();
+            let id = format!("{:x}", hash);
+
+            dict_id_map
+                .entry(id.clone())
+                .or_default()
+                .push(file.clone());
+            path_to_id.insert(file.clone(), id);
+        }
+
         Self {
             dict_dir: Arc::new(dict_dir),
             static_dir: Arc::new(static_dir),
             dict_text_files: Arc::new(dict_text_files),
             dict_resource_files: Arc::new(dict_resource_files),
             dict_configs: Arc::new(configs),
+            dict_id_map: Arc::new(dict_id_map),
+            path_to_id: Arc::new(path_to_id),
             db_pools: Arc::new(Mutex::new(HashMap::new())),
             mdx_readers: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -77,6 +102,50 @@ impl AppState {
 
     pub fn dict_resource_files(&self) -> &[PathBuf] {
         &self.dict_resource_files
+    }
+
+    pub fn get_dict_id(&self, path: &Path) -> Option<String> {
+        self.path_to_id.get(path).cloned()
+    }
+
+    pub fn get_dict_files(&self, id: &str) -> Option<&Vec<PathBuf>> {
+        self.dict_id_map.get(id)
+    }
+
+    pub fn get_dict_text_files_by_id(&self, id: &str) -> Vec<PathBuf> {
+        self.get_dict_files(id)
+            .map(|files| {
+                files
+                    .iter()
+                    .filter(|f| Self::is_mdx_file(f))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn get_dict_resource_files_by_id(&self, id: &str) -> Vec<PathBuf> {
+        let Some(files) = self.get_dict_files(id) else {
+            return Vec::new();
+        };
+
+        let mut seen = HashSet::new();
+        let mut mdd = Vec::new();
+        let mut mdx = Vec::new();
+
+        for file in files {
+            if !seen.insert(file.clone()) {
+                continue;
+            }
+            if Self::is_mdd_file(file) {
+                mdd.push(file.clone());
+            } else if Self::is_mdx_file(file) {
+                mdx.push(file.clone());
+            }
+        }
+
+        mdd.extend(mdx);
+        mdd
     }
 
     pub fn get_dict_config(&self, dict_id: &str) -> Option<DictConfig> {
@@ -177,5 +246,15 @@ impl AppState {
         let mut map = self.mdx_readers.lock().expect("mdx_readers mutex poisoned");
         let entry = map.entry(dict_file).or_insert_with(|| reader.clone());
         Ok(entry.clone())
+    }
+
+    fn is_mdx_file(path: &Path) -> bool {
+        path.extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("mdx"))
+    }
+
+    fn is_mdd_file(path: &Path) -> bool {
+        path.extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("mdd"))
     }
 }

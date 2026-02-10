@@ -1,8 +1,9 @@
 use crate::app_state::AppState;
 use crate::config::{get_dict_dir, scan_dict_files, static_path};
 use crate::handlers::{
-    handle_dict_list, handle_dict_script, handle_dict_style, handle_lucky, handle_query,
-    handle_resource, handle_suggest, handle_trace,
+    handle_dict_audio, handle_dict_entry, handle_dict_list, handle_dict_res, handle_dict_resource,
+    handle_dict_script, handle_dict_style, handle_lucky, handle_query, handle_resource,
+    handle_suggest, handle_trace,
 };
 use crate::indexing::{db_path, indexing};
 
@@ -75,6 +76,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .route("/api/dicts", get(handle_dict_list))
         .route("/api/dict/style", get(handle_dict_style))
         .route("/api/dict/script", get(handle_dict_script))
+        .route("/dict/{id}/entry/{*word}", get(handle_dict_entry))
+        .route("/dict/{id}/res/{*path}", get(handle_dict_res))
+        .route("/dict/{id}/audio/{*path}", get(handle_dict_audio))
+        // Legacy route compatibility
+        .route("/resource/{id}/{*path}", get(handle_dict_resource))
         // 静态文件 + 词典资源处理 (音频、图片等)
         .fallback(handle_resource)
         .layer(TraceLayer::new_for_http())

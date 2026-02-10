@@ -7,11 +7,15 @@ use response::{css_response, js_response, not_found, ok_response};
 use crate::app_state::AppState;
 use crate::config::DictInfo;
 use crate::lucky;
-use crate::query::{query, query_with_trace, suggest};
+use crate::query::{
+    query, query_specific_entry, query_specific_resource, query_with_trace, suggest,
+};
 use serde_derive::Deserialize;
+use std::collections::HashSet;
+use std::path::{Path as FsPath, PathBuf};
 
 use axum::{
-    extract::{Form, Query, State},
+    extract::{Form, Path, Query, State},
     http::Uri,
     response::{Json, Response},
 };
@@ -98,60 +102,23 @@ pub(crate) async fn handle_trace(
 
 pub(crate) async fn handle_resource(State(state): State<AppState>, uri: Uri) -> Response {
     let path = uri.path();
-    let key = path.replace("/", "\\"); // standard mdict key starts with \ e.g. \img\foo.png
+    if let Some(response) =
+        read_static_file_response(state.static_dir(), path.trim_start_matches('/'), true).await
+    {
+        return response;
+    }
 
-    // 1. Try to find in file system (Static Resources)
-    let base_static_dir = state.static_dir().to_path_buf();
-    let relative_path = path.trim_start_matches('/');
-
-    // Security: Reject paths with directory traversal patterns
-    if relative_path.contains("..") {
-        tracing::warn!("Rejected path traversal attempt: {}", path);
+    // 2. Fallback to unscoped dictionary resources (legacy behavior).
+    let candidates = build_resource_candidates(path);
+    if candidates.is_empty() {
         return not_found();
     }
 
-    let mut static_file = base_static_dir.clone();
-    if relative_path.is_empty() || relative_path.ends_with('/') {
-        static_file.push(relative_path);
-        static_file.push("index.html");
-    } else {
-        static_file.push(relative_path);
-    }
-
-    // Security: Verify the final path is within static directory
-    if let Ok(canonical) = static_file.canonicalize() {
-        if let Ok(base_canonical) = base_static_dir.canonicalize() {
-            if !canonical.starts_with(&base_canonical) {
-                tracing::warn!("Path escape attempt blocked: {:?}", static_file);
-                return not_found();
-            }
-        }
-    }
-
-    if static_file.exists() && static_file.is_file() {
-        match fs::read(&static_file).await {
-            Ok(bytes) => {
-                let mime_type = mime_guess::from_path(&static_file).first_or_octet_stream();
-                return ok_response(bytes, mime_type.as_ref());
-            }
-            Err(e) => {
-                tracing::warn!("Failed to read static file {:?}: {}", static_file, e);
-            }
-        }
-    }
-
-    // Candidate keys to try
-    let candidates = vec![
-        key.clone(),                              // \img\foo.png
-        path.to_string(),                         // /img/foo.png
-        path.trim_start_matches('/').to_string(), // img/foo.png
-    ];
-
     let state = state.clone();
     let result = tokio::task::spawn_blocking(move || {
-        for candidate in candidates {
+        for candidate in &candidates {
             tracing::debug!("resource try key: {}", candidate);
-            if let Ok((data, content_type)) = query(&state, candidate) {
+            if let Ok((data, content_type)) = query(&state, candidate.clone()) {
                 return Some(ok_response(data, &content_type));
             }
         }
@@ -160,12 +127,244 @@ pub(crate) async fn handle_resource(State(state): State<AppState>, uri: Uri) -> 
     .await;
 
     match result {
-        Ok(Some(response)) => return response,
-        Ok(None) => {}
-        Err(e) => tracing::warn!("Resource query task failed: {}", e),
+        Ok(Some(response)) => response,
+        Ok(None) => not_found(),
+        Err(e) => {
+            tracing::warn!("Resource query task failed: {}", e);
+            not_found()
+        }
+    }
+}
+
+/// GET /dict/{id}/entry/{*word}
+pub(crate) async fn handle_dict_entry(
+    State(state): State<AppState>,
+    Path((dict_id, word)): Path<(String, String)>,
+) -> Response {
+    let files = state.get_dict_text_files_by_id(&dict_id);
+    if files.is_empty() {
+        return not_found();
     }
 
-    not_found()
+    let candidates = build_entry_candidates(&word);
+    if candidates.is_empty() {
+        return not_found();
+    }
+
+    query_dict_entry(&state, dict_id, files, candidates).await
+}
+
+/// GET /dict/{id}/res/{*path}
+pub(crate) async fn handle_dict_res(
+    State(state): State<AppState>,
+    Path((dict_id, path)): Path<(String, String)>,
+) -> Response {
+    query_dict_resource(state, dict_id, path).await
+}
+
+/// GET /dict/{id}/audio/{*path}
+pub(crate) async fn handle_dict_audio(
+    State(state): State<AppState>,
+    Path((dict_id, path)): Path<(String, String)>,
+) -> Response {
+    query_dict_resource(state, dict_id, path).await
+}
+
+/// Legacy route compatibility: GET /resource/{id}/{*path}
+pub(crate) async fn handle_dict_resource(
+    State(state): State<AppState>,
+    Path((dict_id, path)): Path<(String, String)>,
+) -> Response {
+    query_dict_resource(state, dict_id, path).await
+}
+
+async fn query_dict_resource(state: AppState, dict_id: String, path: String) -> Response {
+    if path.contains("..") {
+        tracing::warn!("Rejected dict resource traversal attempt: {}", path);
+        return not_found();
+    }
+
+    let files = state.get_dict_resource_files_by_id(&dict_id);
+    if files.is_empty() {
+        return not_found();
+    }
+
+    let candidates = build_resource_candidates(&path);
+    if candidates.is_empty() {
+        return match read_static_file_response(state.static_dir(), &path, false).await {
+            Some(resp) => resp,
+            None => not_found(),
+        };
+    }
+
+    let static_dir = state.static_dir().to_path_buf();
+    let state = state.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        for file in files {
+            for candidate in &candidates {
+                if let Ok(Some((data, content_type))) =
+                    query_specific_resource(&state, &file, candidate)
+                {
+                    return Some(ok_response(data, &content_type));
+                }
+            }
+        }
+        None
+    })
+    .await;
+
+    match result {
+        Ok(Some(resp)) => resp,
+        Ok(None) => match read_static_file_response(&static_dir, &path, false).await {
+            Some(resp) => resp,
+            None => not_found(),
+        },
+        Err(e) => {
+            tracing::warn!("dict resource query task failed: {}", e);
+            match read_static_file_response(&static_dir, &path, false).await {
+                Some(resp) => resp,
+                None => not_found(),
+            }
+        }
+    }
+}
+
+async fn query_dict_entry(
+    state: &AppState,
+    dict_id: String,
+    files: Vec<PathBuf>,
+    candidates: Vec<String>,
+) -> Response {
+    let state = state.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        for file in files {
+            for candidate in &candidates {
+                if let Ok(Some((data, content_type))) =
+                    query_specific_entry(&state, &file, candidate, &dict_id)
+                {
+                    return Some(ok_response(data, &content_type));
+                }
+            }
+        }
+        None
+    })
+    .await;
+
+    match result {
+        Ok(Some(resp)) => resp,
+        Ok(None) => not_found(),
+        Err(e) => {
+            tracing::warn!("dict entry query task failed: {}", e);
+            not_found()
+        }
+    }
+}
+
+fn build_resource_candidates(path: &str) -> Vec<String> {
+    let normalized = path
+        .trim()
+        .trim_start_matches('/')
+        .trim_start_matches('\\')
+        .replace('\\', "/");
+
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+
+    let slash_form = normalized.clone();
+    let backslash_form = normalized.replace('/', "\\");
+
+    let mut seen = HashSet::new();
+    let mut candidates = Vec::new();
+    for candidate in [
+        slash_form.clone(),
+        format!("/{}", slash_form),
+        backslash_form.clone(),
+        format!("\\{}", backslash_form),
+    ] {
+        if candidate.is_empty() || !seen.insert(candidate.clone()) {
+            continue;
+        }
+        candidates.push(candidate);
+    }
+
+    candidates
+}
+
+fn build_entry_candidates(word: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut candidates = Vec::new();
+
+    let raw = word.trim();
+    let trimmed = raw
+        .trim_start_matches('/')
+        .trim_start_matches('\\')
+        .trim_end_matches('/')
+        .trim_end_matches('\\');
+
+    for candidate in [raw, trimmed] {
+        if candidate.is_empty() {
+            continue;
+        }
+        if seen.insert(candidate.to_string()) {
+            candidates.push(candidate.to_string());
+        }
+    }
+
+    candidates
+}
+
+async fn read_static_file_response(
+    base_static_dir: &FsPath,
+    relative_path: &str,
+    index_for_directory: bool,
+) -> Option<Response> {
+    let normalized = relative_path.trim().replace('\\', "/");
+    if normalized.contains("..") {
+        tracing::warn!("Rejected static path traversal attempt: {}", relative_path);
+        return None;
+    }
+
+    let mut static_file = base_static_dir.to_path_buf();
+    let relative_path = normalized.trim_start_matches('/');
+
+    if relative_path.is_empty() {
+        if index_for_directory {
+            static_file.push("index.html");
+        } else {
+            return None;
+        }
+    } else if index_for_directory && relative_path.ends_with('/') {
+        static_file.push(relative_path);
+        static_file.push("index.html");
+    } else {
+        static_file.push(relative_path);
+    }
+
+    // Security: verify canonical path remains under static root when possible.
+    if let Ok(canonical) = static_file.canonicalize() {
+        if let Ok(base_canonical) = base_static_dir.canonicalize() {
+            if !canonical.starts_with(&base_canonical) {
+                tracing::warn!("Path escape attempt blocked: {:?}", static_file);
+                return None;
+            }
+        }
+    }
+
+    if !static_file.exists() || !static_file.is_file() {
+        return None;
+    }
+
+    match fs::read(&static_file).await {
+        Ok(bytes) => {
+            let mime_type = mime_guess::from_path(&static_file).first_or_octet_stream();
+            Some(ok_response(bytes, mime_type.as_ref()))
+        }
+        Err(e) => {
+            tracing::warn!("Failed to read static file {:?}: {}", static_file, e);
+            None
+        }
+    }
 }
 
 // ============ Dictionary Config API ============

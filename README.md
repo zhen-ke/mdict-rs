@@ -25,6 +25,16 @@ The web UI is served from (in order):
 2. `./static/` in the current working directory
 3. `resources/static/` (development)
 
+### Dictionary resource routing
+
+To keep entry links, images and audio separated, the server now exposes:
+
+1. `GET /dict/{id}/entry/{word}` for dictionary entry jumps
+2. `GET /dict/{id}/res/{path}` for static resources in dictionary packages
+3. `GET /dict/{id}/audio/{path}` for audio resources
+
+Legacy `GET /resource/{id}/{path}` still works for backward compatibility.
+
 ## screenshot
 
 ![screenshot](screenshot.png)

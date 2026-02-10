@@ -4,6 +4,12 @@ use std::collections::HashMap;
 use std::path::Path;
 use tracing::{debug, error, info, warn};
 
+mod rewrite;
+pub(crate) use rewrite::rewrite_html;
+
+mod specific;
+pub use specific::{query_specific_entry, query_specific_resource};
+
 pub fn query(state: &AppState, word: String) -> Result<(Vec<u8>, String), String> {
     query_internal(state, word, 0)
 }
@@ -31,55 +37,17 @@ pub fn query_with_trace(state: &AppState, word: String) -> Result<(Vec<String>, 
 /// Check if a word redirects via @@@LINK= and return the target
 fn get_link_target(state: &AppState, word: &str) -> Option<String> {
     for file in state.dict_text_files() {
-        let conn = match state.get_db_connection(file) {
-            Ok(c) => c,
-            Err(_) => continue,
+        let Ok(Some(data)) = lookup_record_in_file(state, file, word) else {
+            continue;
         };
-        let mut stmt = conn
-            .prepare("select record_offset, record_length, block_offset, block_size, block_dsize from MDX_INDEX WHERE text= :word limit 1;")
-            .ok()?;
-
-        let mut rows = stmt.query(named_params! { ":word": word }).ok()?;
-
-        if let Some(row) = rows.next().ok()? {
-            let record_offset: usize = row.get(0).unwrap_or(0);
-            let record_length: usize = row.get(1).unwrap_or(0);
-            let block_offset: usize = row.get(2).unwrap_or(0);
-            let block_csize: usize = row.get(3).unwrap_or(0);
-            let block_dsize: usize = row.get(4).unwrap_or(0);
-
-            let reader = state.get_mdx_reader(file).ok()?;
-            let data = reader
-                .read_record(
-                    block_offset,
-                    block_csize,
-                    block_dsize,
-                    record_offset,
-                    record_length,
-                )
-                .ok()?;
-
-            if let Ok(text) = String::from_utf8(data) {
-                let first_line = text.lines().next().unwrap_or("").trim();
-                if first_line.starts_with("@@@LINK=") {
-                    let linked_word: String = first_line
-                        .trim_start_matches("@@@LINK=")
-                        .chars()
-                        .filter(|c| !c.is_control())
-                        .collect::<String>()
-                        .trim()
-                        .to_string();
-                    if !linked_word.is_empty() {
-                        return Some(linked_word);
-                    }
-                }
-            }
+        if let Some(linked_word) = extract_link_target(&data) {
+            return Some(linked_word);
         }
     }
     None
 }
 
-fn is_resource_key(word: &str) -> bool {
+pub(crate) fn is_resource_key(word: &str) -> bool {
     word.starts_with('\\') || word.starts_with('/')
 }
 
@@ -98,86 +66,112 @@ fn query_internal(state: &AppState, word: String, depth: u8) -> Result<(Vec<u8>,
     };
 
     for file in files.iter() {
-        let conn = match state.get_db_connection(file) {
-            Ok(c) => c,
-            Err(e) => {
-                debug!("skip dict {:?}: {}", file, e);
-                continue;
-            }
+        let Some(data) = lookup_record_in_file(state, file, &w)? else {
+            continue;
         };
-        let mut stmt = conn
-            .prepare("select record_offset, record_length, block_offset, block_size, block_dsize from MDX_INDEX WHERE text= :word limit 1;")
-            .map_err(|e| e.to_string())?;
-        debug!("query params={}, dict={:?}", &w, file);
 
-        let mut rows = stmt
-            .query(named_params! { ":word": w })
-            .map_err(|e| e.to_string())?;
-
-        if let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            let record_offset: usize = row.get(0).unwrap_or(0);
-            let record_length: usize = row.get(1).unwrap_or(0);
-            let block_offset: usize = row.get(2).unwrap_or(0);
-            let block_csize: usize = row.get(3).unwrap_or(0);
-            let block_dsize: usize = row.get(4).unwrap_or(0);
-
-            // Access cached reader
-            let reader = state.get_mdx_reader(file).map_err(|e| e.to_string())?;
-
-            let data = reader
-                .read_record(
-                    block_offset,
-                    block_csize,
-                    block_dsize,
-                    record_offset,
-                    record_length,
-                )
-                .map_err(|e| {
-                    let err = format!("failed to read record: {}", e);
-                    error!("{}", err);
-                    err
-                })?;
-
-            // Check for @@@LINK= redirect
-            if !is_resource_key(&w) {
-                let text = String::from_utf8_lossy(&data);
-                let first_line = text.lines().next().unwrap_or("").trim();
-                if first_line.starts_with("@@@LINK=") {
-                    let linked_word: String = first_line
-                        .trim_start_matches("@@@LINK=")
-                        .chars()
-                        .filter(|c| !c.is_control()) // Remove all control characters
-                        .collect::<String>()
-                        .trim()
-                        .to_string();
-                    if !linked_word.is_empty() {
-                        info!("following @@@LINK redirect: {} -> {}", w, linked_word);
-                        return query_internal(state, linked_word, depth + 1);
-                    }
-                }
+        // Check for @@@LINK= redirect
+        if !is_resource_key(&w) {
+            if let Some(linked_word) = extract_link_target(&data) {
+                info!("following @@@LINK redirect: {} -> {}", w, linked_word);
+                return query_internal(state, linked_word, depth + 1);
             }
-
-            // Determine Content-Type
-            let content_type = if is_resource_key(&w) {
-                let path = Path::new(&w);
-                match path.extension().and_then(|s| s.to_str()) {
-                    Some("jpg") | Some("jpeg") => "image/jpeg",
-                    Some("png") => "image/png",
-                    Some("gif") => "image/gif",
-                    Some("css") => "text/css",
-                    Some("js") => "text/javascript",
-                    Some("wav") => "audio/wav",
-                    Some("mp3") => "audio/mp3",
-                    _ => "application/octet-stream",
-                }
-            } else {
-                "text/html"
-            };
-
-            return Ok((data, content_type.to_string()));
         }
+
+        let mut final_data = data;
+        let content_type = if is_resource_key(&w) {
+            detect_content_type(&w)
+        } else {
+            if let Some(dict_id) = state.get_dict_id(file) {
+                let text = String::from_utf8_lossy(&final_data).to_string();
+                let rewritten = rewrite_html(&text, &dict_id);
+                final_data = rewritten.into_bytes();
+            }
+            "text/html".to_string()
+        };
+
+        return Ok((final_data, content_type));
     }
     Err("not found".to_string())
+}
+
+pub(crate) fn detect_content_type(word: &str) -> String {
+    mime_guess::from_path(word)
+        .first_or_octet_stream()
+        .essence_str()
+        .to_string()
+}
+
+pub(crate) fn extract_link_target(data: &[u8]) -> Option<String> {
+    let text = String::from_utf8(data.to_vec()).ok()?;
+    let first_line = text.lines().next().unwrap_or("").trim();
+    if !first_line.starts_with("@@@LINK=") {
+        return None;
+    }
+
+    let linked_word = first_line
+        .trim_start_matches("@@@LINK=")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if linked_word.is_empty() {
+        None
+    } else {
+        Some(linked_word)
+    }
+}
+
+pub(crate) fn lookup_record_in_file(
+    state: &AppState,
+    file: &Path,
+    word: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    let conn = match state.get_db_connection(file) {
+        Ok(c) => c,
+        Err(e) => {
+            debug!("skip dict {:?}: {}", file, e);
+            return Ok(None);
+        }
+    };
+    let mut stmt = conn
+        .prepare(
+            "select record_offset, record_length, block_offset, block_size, block_dsize from MDX_INDEX WHERE text= :word limit 1;",
+        )
+        .map_err(|e| e.to_string())?;
+    debug!("query params={}, dict={:?}", word, file);
+
+    let mut rows = stmt
+        .query(named_params! { ":word": word })
+        .map_err(|e| e.to_string())?;
+
+    let Some(row) = rows.next().map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+
+    let record_offset: usize = row.get(0).unwrap_or(0);
+    let record_length: usize = row.get(1).unwrap_or(0);
+    let block_offset: usize = row.get(2).unwrap_or(0);
+    let block_csize: usize = row.get(3).unwrap_or(0);
+    let block_dsize: usize = row.get(4).unwrap_or(0);
+
+    let reader = state.get_mdx_reader(file).map_err(|e| e.to_string())?;
+    let data = reader
+        .read_record(
+            block_offset,
+            block_csize,
+            block_dsize,
+            record_offset,
+            record_length,
+        )
+        .map_err(|e| {
+            let err = format!("failed to read record: {}", e);
+            error!("{}", err);
+            err
+        })?;
+
+    Ok(Some(data))
 }
 
 /// 返回以指定前缀开头的词条列表（用于搜索建议）
