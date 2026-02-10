@@ -14,6 +14,15 @@ pub fn query(state: &AppState, word: String) -> Result<(Vec<u8>, String), String
     query_internal(state, word, 0)
 }
 
+/// Aggregate query results from all enabled text dictionaries.
+/// Used by `/query` and `/lucky` so the frontend can show multiple dictionary entries together.
+pub fn query_aggregate(state: &AppState, word: String) -> Result<(Vec<u8>, String), String> {
+    if is_resource_key(&word) {
+        return query(state, word);
+    }
+    query_aggregate_entries(state, &word)
+}
+
 /// Query with trace - returns the redirect chain and final word
 /// Used for debugging @@@LINK depth
 pub fn query_with_trace(state: &AppState, word: String) -> Result<(Vec<String>, String), String> {
@@ -95,6 +104,44 @@ fn query_internal(state: &AppState, word: String, depth: u8) -> Result<(Vec<u8>,
     Err("not found".to_string())
 }
 
+fn query_aggregate_entries(state: &AppState, word: &str) -> Result<(Vec<u8>, String), String> {
+    let mut sections = Vec::new();
+
+    for file in state.dict_text_files() {
+        let Some(dict_id) = state.get_dict_id(file) else {
+            continue;
+        };
+
+        match query_specific_entry(state, file, word, &dict_id) {
+            Ok(Some((data, _))) => {
+                let body = String::from_utf8_lossy(&data).to_string();
+                let title = state.get_dict_display_name(file);
+                let container_class = state.get_dict_container_class(file);
+                sections.push(AggregateSection {
+                    dict_id,
+                    title,
+                    container_class,
+                    body,
+                });
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(
+                    "dict entry query failed for {:?}, word '{}': {}",
+                    file, word, e
+                );
+            }
+        }
+    }
+
+    if sections.is_empty() {
+        return Err("not found".to_string());
+    }
+
+    let html = render_aggregate_html(word, &sections);
+    Ok((html.into_bytes(), "text/html".to_string()))
+}
+
 pub(crate) fn detect_content_type(word: &str) -> String {
     mime_guess::from_path(word)
         .first_or_octet_stream()
@@ -172,6 +219,61 @@ pub(crate) fn lookup_record_in_file(
         })?;
 
     Ok(Some(data))
+}
+
+struct AggregateSection {
+    dict_id: String,
+    title: String,
+    container_class: Option<String>,
+    body: String,
+}
+
+fn render_aggregate_html(word: &str, sections: &[AggregateSection]) -> String {
+    let mut html = String::with_capacity(sections.len() * 4096);
+    html.push_str(r#"<div class="mdict-aggregate">"#);
+    html.push_str(&format!(
+        r#"<div class="mdict-aggregate-meta"><span class="mdict-agg-hit">命中 {} 本词典</span><span class="mdict-agg-dot">·</span><span class="mdict-agg-label">查询词</span><strong class="mdict-query-word">{}</strong></div>"#,
+        sections.len(),
+        escape_html(word)
+    ));
+
+    for (idx, section) in sections.iter().enumerate() {
+        let class_attr = section
+            .container_class
+            .as_ref()
+            .map(|cls| format!(" {}", escape_html_attr(cls)))
+            .unwrap_or_default();
+
+        html.push_str(&format!(
+            r#"<section class="mdict-dict-section{}" data-dict-id="{}">"#,
+            class_attr,
+            escape_html_attr(&section.dict_id)
+        ));
+        html.push_str(&format!(
+            r#"<header class="mdict-dict-head"><div class="mdict-dict-title"><span class="mdict-dict-index">{}</span><span class="mdict-dict-name">{}</span></div><span class="mdict-dict-id">{}</span></header>"#,
+            idx + 1,
+            escape_html(&section.title),
+            escape_html(&section.dict_id)
+        ));
+        html.push_str(r#"<div class="mdict-dict-body">"#);
+        html.push_str(&section.body);
+        html.push_str("</div></section>");
+    }
+
+    html.push_str("</div>");
+    html
+}
+
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn escape_html_attr(s: &str) -> String {
+    escape_html(s)
 }
 
 /// 返回以指定前缀开头的词条列表（用于搜索建议）

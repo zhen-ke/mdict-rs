@@ -1,12 +1,29 @@
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use lru::LruCache;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 
 use crate::config::{DictConfig, DictInfo};
 use crate::mdict::reader::MdxReader;
+
+const ENTRY_CACHE_SIZE: usize = 256;
+const RESOURCE_CACHE_SIZE: usize = 1024;
+const NEGATIVE_CACHE_SIZE: usize = 1024;
+const ENTRY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const RESOURCE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
+const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(20);
+
+#[derive(Clone)]
+struct CachedPayload {
+    data: Vec<u8>,
+    content_type: String,
+    expires_at: Instant,
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -24,6 +41,9 @@ pub struct AppState {
 
     db_pools: Arc<Mutex<HashMap<PathBuf, Pool<SqliteConnectionManager>>>>,
     mdx_readers: Arc<Mutex<HashMap<PathBuf, Arc<MdxReader>>>>,
+    entry_cache: Arc<Mutex<LruCache<String, CachedPayload>>>,
+    resource_cache: Arc<Mutex<LruCache<String, CachedPayload>>>,
+    negative_cache: Arc<Mutex<LruCache<String, Instant>>>,
 }
 
 impl AppState {
@@ -85,6 +105,15 @@ impl AppState {
             path_to_id: Arc::new(path_to_id),
             db_pools: Arc::new(Mutex::new(HashMap::new())),
             mdx_readers: Arc::new(Mutex::new(HashMap::new())),
+            entry_cache: Arc::new(Mutex::new(LruCache::new(
+                NonZeroUsize::new(ENTRY_CACHE_SIZE).expect("ENTRY_CACHE_SIZE > 0"),
+            ))),
+            resource_cache: Arc::new(Mutex::new(LruCache::new(
+                NonZeroUsize::new(RESOURCE_CACHE_SIZE).expect("RESOURCE_CACHE_SIZE > 0"),
+            ))),
+            negative_cache: Arc::new(Mutex::new(LruCache::new(
+                NonZeroUsize::new(NEGATIVE_CACHE_SIZE).expect("NEGATIVE_CACHE_SIZE > 0"),
+            ))),
         }
     }
 
@@ -171,6 +200,20 @@ impl AppState {
             .collect()
     }
 
+    pub fn get_dict_display_name(&self, dict_path: &Path) -> String {
+        let default_config = DictConfig::default();
+        self.dict_configs
+            .get(dict_path)
+            .unwrap_or(&default_config)
+            .get_display_name(dict_path)
+    }
+
+    pub fn get_dict_container_class(&self, dict_path: &Path) -> Option<String> {
+        self.dict_configs
+            .get(dict_path)
+            .and_then(|cfg| cfg.container_class.clone())
+    }
+
     fn db_path(dict_file: &Path) -> PathBuf {
         PathBuf::from(format!("{}.db", dict_file.to_string_lossy()))
     }
@@ -248,6 +291,58 @@ impl AppState {
         Ok(entry.clone())
     }
 
+    pub fn get_entry_cached(&self, key: &str) -> Option<(Vec<u8>, String)> {
+        Self::cache_get(&self.entry_cache, key)
+    }
+
+    pub fn put_entry_cached(&self, key: String, data: Vec<u8>, content_type: String) {
+        Self::cache_put(&self.entry_cache, key, data, content_type, ENTRY_CACHE_TTL);
+    }
+
+    pub fn get_resource_cached(&self, key: &str) -> Option<(Vec<u8>, String)> {
+        Self::cache_get(&self.resource_cache, key)
+    }
+
+    pub fn put_resource_cached(&self, key: String, data: Vec<u8>, content_type: String) {
+        Self::cache_put(
+            &self.resource_cache,
+            key,
+            data,
+            content_type,
+            RESOURCE_CACHE_TTL,
+        );
+    }
+
+    pub fn is_negative_cached(&self, key: &str) -> bool {
+        let now = Instant::now();
+        let mut cache = self
+            .negative_cache
+            .lock()
+            .expect("negative_cache mutex poisoned");
+        if let Some(expiry) = cache.get(key).cloned() {
+            if expiry > now {
+                return true;
+            }
+            cache.pop(key);
+        }
+        false
+    }
+
+    pub fn put_negative_cache(&self, key: String) {
+        let expiry = Instant::now() + NEGATIVE_CACHE_TTL;
+        self.negative_cache
+            .lock()
+            .expect("negative_cache mutex poisoned")
+            .put(key, expiry);
+    }
+
+    pub fn clear_negative_cache(&self, key: &str) {
+        self.negative_cache
+            .lock()
+            .expect("negative_cache mutex poisoned")
+            .pop(key);
+    }
+
     fn is_mdx_file(path: &Path) -> bool {
         path.extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("mdx"))
@@ -256,5 +351,38 @@ impl AppState {
     fn is_mdd_file(path: &Path) -> bool {
         path.extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("mdd"))
+    }
+
+    fn cache_get(
+        cache: &Arc<Mutex<LruCache<String, CachedPayload>>>,
+        key: &str,
+    ) -> Option<(Vec<u8>, String)> {
+        let now = Instant::now();
+        let mut cache = cache.lock().expect("cache mutex poisoned");
+        if let Some(payload) = cache.get(key).cloned() {
+            if payload.expires_at > now {
+                return Some((payload.data, payload.content_type));
+            }
+            cache.pop(key);
+        }
+        None
+    }
+
+    fn cache_put(
+        cache: &Arc<Mutex<LruCache<String, CachedPayload>>>,
+        key: String,
+        data: Vec<u8>,
+        content_type: String,
+        ttl: Duration,
+    ) {
+        let payload = CachedPayload {
+            data,
+            content_type,
+            expires_at: Instant::now() + ttl,
+        };
+        cache
+            .lock()
+            .expect("cache mutex poisoned")
+            .put(key, payload);
     }
 }

@@ -2,24 +2,27 @@ mod error;
 mod response;
 
 pub use error::AppError;
-use response::{css_response, js_response, not_found, ok_response};
+use response::{cacheable_binary_response, css_response, js_response, not_found, ok_response};
 
 use crate::app_state::AppState;
 use crate::config::DictInfo;
 use crate::lucky;
 use crate::query::{
-    query, query_specific_entry, query_specific_resource, query_with_trace, suggest,
+    query, query_aggregate, query_specific_entry, query_specific_resource, query_with_trace,
+    suggest,
 };
 use serde_derive::Deserialize;
 use std::collections::HashSet;
-use std::path::{Path as FsPath, PathBuf};
+use std::path::Path as FsPath;
 
 use axum::{
     extract::{Form, Path, Query, State},
-    http::Uri,
+    http::{HeaderMap, Uri},
     response::{Json, Response},
 };
 use tokio::fs;
+
+const RESOURCE_CACHE_CONTROL: &str = "public, max-age=86400, immutable";
 
 #[derive(Deserialize, Debug)]
 pub struct SuggestQuery {
@@ -35,25 +38,71 @@ pub(crate) async fn handle_query(
     State(state): State<AppState>,
     Form(params): Form<QueryForm>,
 ) -> Result<Response, AppError> {
-    let word = params.word;
+    let word = params.word.trim().to_string();
     tracing::info!("Processing query for word: {}", word);
-    let state = state.clone();
-    let result = tokio::task::spawn_blocking(move || query(&state, word))
+
+    let cache_key = cache_key_aggregate_entry(&word);
+    let negative_key = negative_key(&cache_key);
+    if let Some((data, content_type)) = state.get_entry_cached(&cache_key) {
+        return Ok(ok_response(data, &content_type));
+    }
+    if state.is_negative_cached(&negative_key) {
+        return Err(AppError::NotFound);
+    }
+
+    let query_state = state.clone();
+    let query_word = word.clone();
+    let result = tokio::task::spawn_blocking(move || query_aggregate(&query_state, query_word))
         .await
         .map_err(|e| AppError::Internal(format!("query task failed: {}", e)))?;
-    let (data, content_type) = result.map_err(AppError::from)?;
-    Ok(ok_response(data, &content_type))
+
+    match result {
+        Ok((data, content_type)) => {
+            state.put_entry_cached(cache_key, data.clone(), content_type.clone());
+            state.clear_negative_cache(&negative_key);
+            Ok(ok_response(data, &content_type))
+        }
+        Err(e) => {
+            if e == "not found" {
+                state.put_negative_cache(negative_key);
+            }
+            Err(AppError::from(e))
+        }
+    }
 }
 
 pub(crate) async fn handle_lucky(State(state): State<AppState>) -> Result<Response, AppError> {
     let word = lucky::lucky_word();
     tracing::info!("Lucky query for word: {}", word);
-    let state = state.clone();
-    let result = tokio::task::spawn_blocking(move || query(&state, word))
+
+    let cache_key = cache_key_aggregate_entry(&word);
+    let negative_key = negative_key(&cache_key);
+    if let Some((data, content_type)) = state.get_entry_cached(&cache_key) {
+        return Ok(ok_response(data, &content_type));
+    }
+    if state.is_negative_cached(&negative_key) {
+        return Err(AppError::NotFound);
+    }
+
+    let query_state = state.clone();
+    let query_word = word.clone();
+    let result = tokio::task::spawn_blocking(move || query_aggregate(&query_state, query_word))
         .await
         .map_err(|e| AppError::Internal(format!("query task failed: {}", e)))?;
-    let (data, content_type) = result.map_err(AppError::from)?;
-    Ok(ok_response(data, &content_type))
+
+    match result {
+        Ok((data, content_type)) => {
+            state.put_entry_cached(cache_key, data.clone(), content_type.clone());
+            state.clear_negative_cache(&negative_key);
+            Ok(ok_response(data, &content_type))
+        }
+        Err(e) => {
+            if e == "not found" {
+                state.put_negative_cache(negative_key);
+            }
+            Err(AppError::from(e))
+        }
+    }
 }
 
 pub(crate) async fn handle_suggest(
@@ -100,26 +149,52 @@ pub(crate) async fn handle_trace(
     }
 }
 
-pub(crate) async fn handle_resource(State(state): State<AppState>, uri: Uri) -> Response {
+pub(crate) async fn handle_resource(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
     let path = uri.path();
-    if let Some(response) =
-        read_static_file_response(state.static_dir(), path.trim_start_matches('/'), true).await
-    {
-        return response;
-    }
+    let cache_key = cache_key_global_resource(path);
+    let negative_key = negative_key(&cache_key);
 
-    // 2. Fallback to unscoped dictionary resources (legacy behavior).
-    let candidates = build_resource_candidates(path);
-    if candidates.is_empty() {
+    if let Some((data, content_type)) = state.get_resource_cached(&cache_key) {
+        return cacheable_binary_response(
+            data,
+            &content_type,
+            RESOURCE_CACHE_CONTROL,
+            Some(&headers),
+        );
+    }
+    if state.is_negative_cached(&negative_key) {
         return not_found();
     }
 
-    let state = state.clone();
+    if let Some((data, content_type)) =
+        read_static_file(state.static_dir(), path.trim_start_matches('/'), true).await
+    {
+        state.put_resource_cached(cache_key, data.clone(), content_type.clone());
+        state.clear_negative_cache(&negative_key);
+        return cacheable_binary_response(
+            data,
+            &content_type,
+            RESOURCE_CACHE_CONTROL,
+            Some(&headers),
+        );
+    }
+
+    let candidates = build_resource_candidates(path);
+    if candidates.is_empty() {
+        state.put_negative_cache(negative_key);
+        return not_found();
+    }
+
+    let query_state = state.clone();
     let result = tokio::task::spawn_blocking(move || {
         for candidate in &candidates {
             tracing::debug!("resource try key: {}", candidate);
-            if let Ok((data, content_type)) = query(&state, candidate.clone()) {
-                return Some(ok_response(data, &content_type));
+            if let Ok((data, content_type)) = query(&query_state, candidate.clone()) {
+                return Some((data, content_type));
             }
         }
         None
@@ -127,10 +202,18 @@ pub(crate) async fn handle_resource(State(state): State<AppState>, uri: Uri) -> 
     .await;
 
     match result {
-        Ok(Some(response)) => response,
-        Ok(None) => not_found(),
+        Ok(Some((data, content_type))) => {
+            state.put_resource_cached(cache_key, data.clone(), content_type.clone());
+            state.clear_negative_cache(&negative_key);
+            cacheable_binary_response(data, &content_type, RESOURCE_CACHE_CONTROL, Some(&headers))
+        }
+        Ok(None) => {
+            state.put_negative_cache(negative_key);
+            not_found()
+        }
         Err(e) => {
             tracing::warn!("Resource query task failed: {}", e);
+            state.put_negative_cache(negative_key);
             not_found()
         }
     }
@@ -151,113 +234,152 @@ pub(crate) async fn handle_dict_entry(
         return not_found();
     }
 
-    query_dict_entry(&state, dict_id, files, candidates).await
+    let cache_key = cache_key_dict_entry(&dict_id, &word);
+    let negative_key = negative_key(&cache_key);
+    if let Some((data, content_type)) = state.get_entry_cached(&cache_key) {
+        return ok_response(data, &content_type);
+    }
+    if state.is_negative_cached(&negative_key) {
+        return not_found();
+    }
+
+    let state_cloned = state.clone();
+    let dict_id_for_query = dict_id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        for file in files {
+            for candidate in &candidates {
+                if let Ok(Some((data, content_type))) =
+                    query_specific_entry(&state_cloned, &file, candidate, &dict_id_for_query)
+                {
+                    return Some((data, content_type));
+                }
+            }
+        }
+        None
+    })
+    .await;
+
+    match result {
+        Ok(Some((data, content_type))) => {
+            state.put_entry_cached(cache_key, data.clone(), content_type.clone());
+            state.clear_negative_cache(&negative_key);
+            ok_response(data, &content_type)
+        }
+        Ok(None) => {
+            state.put_negative_cache(negative_key);
+            not_found()
+        }
+        Err(e) => {
+            tracing::warn!("dict entry query task failed: {}", e);
+            state.put_negative_cache(negative_key);
+            not_found()
+        }
+    }
 }
 
 /// GET /dict/{id}/res/{*path}
 pub(crate) async fn handle_dict_res(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path((dict_id, path)): Path<(String, String)>,
 ) -> Response {
-    query_dict_resource(state, dict_id, path).await
+    query_dict_resource(state, headers, dict_id, path).await
 }
 
 /// GET /dict/{id}/audio/{*path}
 pub(crate) async fn handle_dict_audio(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path((dict_id, path)): Path<(String, String)>,
 ) -> Response {
-    query_dict_resource(state, dict_id, path).await
+    query_dict_resource(state, headers, dict_id, path).await
 }
 
 /// Legacy route compatibility: GET /resource/{id}/{*path}
 pub(crate) async fn handle_dict_resource(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path((dict_id, path)): Path<(String, String)>,
 ) -> Response {
-    query_dict_resource(state, dict_id, path).await
+    query_dict_resource(state, headers, dict_id, path).await
 }
 
-async fn query_dict_resource(state: AppState, dict_id: String, path: String) -> Response {
+async fn query_dict_resource(
+    state: AppState,
+    headers: HeaderMap,
+    dict_id: String,
+    path: String,
+) -> Response {
     if path.contains("..") {
         tracing::warn!("Rejected dict resource traversal attempt: {}", path);
         return not_found();
     }
 
-    let files = state.get_dict_resource_files_by_id(&dict_id);
-    if files.is_empty() {
+    let cache_key = cache_key_dict_resource(&dict_id, &path);
+    let negative_key = negative_key(&cache_key);
+    if let Some((data, content_type)) = state.get_resource_cached(&cache_key) {
+        return cacheable_binary_response(
+            data,
+            &content_type,
+            RESOURCE_CACHE_CONTROL,
+            Some(&headers),
+        );
+    }
+    if state.is_negative_cached(&negative_key) {
         return not_found();
     }
 
+    let files = state.get_dict_resource_files_by_id(&dict_id);
     let candidates = build_resource_candidates(&path);
-    if candidates.is_empty() {
-        return match read_static_file_response(state.static_dir(), &path, false).await {
-            Some(resp) => resp,
-            None => not_found(),
-        };
-    }
 
-    let static_dir = state.static_dir().to_path_buf();
-    let state = state.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        for file in files {
-            for candidate in &candidates {
-                if let Ok(Some((data, content_type))) =
-                    query_specific_resource(&state, &file, candidate)
-                {
-                    return Some(ok_response(data, &content_type));
+    if !files.is_empty() && !candidates.is_empty() {
+        let query_state = state.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            for file in files {
+                for candidate in &candidates {
+                    if let Ok(Some((data, content_type))) =
+                        query_specific_resource(&query_state, &file, candidate)
+                    {
+                        return Some((data, content_type));
+                    }
                 }
             }
-        }
-        None
-    })
-    .await;
+            None
+        })
+        .await;
 
-    match result {
-        Ok(Some(resp)) => resp,
-        Ok(None) => match read_static_file_response(&static_dir, &path, false).await {
-            Some(resp) => resp,
-            None => not_found(),
-        },
-        Err(e) => {
-            tracing::warn!("dict resource query task failed: {}", e);
-            match read_static_file_response(&static_dir, &path, false).await {
-                Some(resp) => resp,
-                None => not_found(),
+        match result {
+            Ok(Some((data, content_type))) => {
+                state.put_resource_cached(cache_key, data.clone(), content_type.clone());
+                state.clear_negative_cache(&negative_key);
+                return cacheable_binary_response(
+                    data,
+                    &content_type,
+                    RESOURCE_CACHE_CONTROL,
+                    Some(&headers),
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!("dict resource query task failed: {}", e);
             }
         }
     }
-}
 
-async fn query_dict_entry(
-    state: &AppState,
-    dict_id: String,
-    files: Vec<PathBuf>,
-    candidates: Vec<String>,
-) -> Response {
-    let state = state.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        for file in files {
-            for candidate in &candidates {
-                if let Ok(Some((data, content_type))) =
-                    query_specific_entry(&state, &file, candidate, &dict_id)
-                {
-                    return Some(ok_response(data, &content_type));
-                }
-            }
-        }
-        None
-    })
-    .await;
-
-    match result {
-        Ok(Some(resp)) => resp,
-        Ok(None) => not_found(),
-        Err(e) => {
-            tracing::warn!("dict entry query task failed: {}", e);
-            not_found()
-        }
+    // Fallback: serve static assets for dictionary-rendered pages (e.g. lm6.css/lm6.js).
+    if let Some((data, content_type)) = read_static_file(state.static_dir(), &path, false).await {
+        state.put_resource_cached(cache_key, data.clone(), content_type.clone());
+        state.clear_negative_cache(&negative_key);
+        return cacheable_binary_response(
+            data,
+            &content_type,
+            RESOURCE_CACHE_CONTROL,
+            Some(&headers),
+        );
     }
+
+    state.put_negative_cache(negative_key);
+    not_found()
 }
 
 fn build_resource_candidates(path: &str) -> Vec<String> {
@@ -314,11 +436,11 @@ fn build_entry_candidates(word: &str) -> Vec<String> {
     candidates
 }
 
-async fn read_static_file_response(
+async fn read_static_file(
     base_static_dir: &FsPath,
     relative_path: &str,
     index_for_directory: bool,
-) -> Option<Response> {
+) -> Option<(Vec<u8>, String)> {
     let normalized = relative_path.trim().replace('\\', "/");
     if normalized.contains("..") {
         tracing::warn!("Rejected static path traversal attempt: {}", relative_path);
@@ -357,14 +479,45 @@ async fn read_static_file_response(
 
     match fs::read(&static_file).await {
         Ok(bytes) => {
-            let mime_type = mime_guess::from_path(&static_file).first_or_octet_stream();
-            Some(ok_response(bytes, mime_type.as_ref()))
+            let mime_type = mime_guess::from_path(&static_file)
+                .first_or_octet_stream()
+                .essence_str()
+                .to_string();
+            Some((bytes, mime_type))
         }
         Err(e) => {
             tracing::warn!("Failed to read static file {:?}: {}", static_file, e);
             None
         }
     }
+}
+
+fn cache_key_aggregate_entry(word: &str) -> String {
+    format!("entry:aggregate:{}", word.trim().to_lowercase())
+}
+
+fn cache_key_dict_entry(dict_id: &str, word: &str) -> String {
+    format!(
+        "entry:dict:{}:{}",
+        dict_id.trim().to_lowercase(),
+        word.trim().to_lowercase()
+    )
+}
+
+fn cache_key_global_resource(path: &str) -> String {
+    format!("resource:global:{}", path.trim())
+}
+
+fn cache_key_dict_resource(dict_id: &str, path: &str) -> String {
+    format!(
+        "resource:dict:{}:{}",
+        dict_id.trim().to_lowercase(),
+        path.trim()
+    )
+}
+
+fn negative_key(cache_key: &str) -> String {
+    format!("negative:{}", cache_key)
 }
 
 // ============ Dictionary Config API ============
