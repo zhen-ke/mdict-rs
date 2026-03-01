@@ -78,7 +78,7 @@ pub(crate) fn ensure_index(file: &Path, reindex: bool) -> anyhow::Result<()> {
 pub(crate) fn mdx_to_sqlite(file: &Path) -> anyhow::Result<()> {
     let db_file = db_path(file);
     let mut conn = Connection::open(&db_file)?;
-    // Enable WAL mode and set timeout to prevent locking issues
+    // Enable WAL mode during index build.
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "busy_timeout", "5000")?;

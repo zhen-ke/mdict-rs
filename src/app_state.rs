@@ -9,6 +9,7 @@ use lru::LruCache;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use ripemd::{Digest, Ripemd160};
+use rusqlite::OpenFlags;
 
 use crate::config::{DictConfig, DictInfo};
 use crate::mdict::reader::MdxReader;
@@ -250,18 +251,19 @@ impl AppState {
     }
 
     fn build_pool(db_file: &Path) -> anyhow::Result<Pool<SqliteConnectionManager>> {
-        let manager = SqliteConnectionManager::file(db_file).with_init(|conn| {
-            // SQLite 性能优化 (忽略错误，避免 panic)
-            let _ = conn.pragma_update(None, "busy_timeout", "5000");
-            let _ = conn.pragma_update(None, "journal_mode", "WAL");
-            let _ = conn.pragma_update(None, "synchronous", "NORMAL");
-            let _ = conn.pragma_update(None, "cache_size", "-64000");
-            let _ = conn.execute(
-                "create index if not exists idx_mdx_text_nocase on MDX_INDEX(text COLLATE NOCASE)",
-                [],
-            );
-            Ok(())
-        });
+        let db_uri = format!("file:{}?mode=ro&immutable=1", db_file.to_string_lossy());
+        let manager = SqliteConnectionManager::file(db_uri)
+            .with_flags(
+                OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                    | OpenFlags::SQLITE_OPEN_URI,
+            )
+            .with_init(|conn| {
+                // Read-path tuning only: avoid any DDL/pragma that requires writes.
+                let _ = conn.pragma_update(None, "cache_size", "-64000");
+                let _ = conn.pragma_update(None, "temp_store", "MEMORY");
+                Ok(())
+            });
 
         Pool::builder()
             .max_size(10)
