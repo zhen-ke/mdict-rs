@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use axum::body::Bytes;
 use rusqlite::named_params;
 use tracing::{debug, error};
 
@@ -17,23 +18,25 @@ pub(crate) fn detect_content_type(word: &str) -> String {
 }
 
 pub(crate) fn extract_link_target(data: &[u8]) -> Option<String> {
-    let text = String::from_utf8(data.to_vec()).ok()?;
+    let text = std::str::from_utf8(data).ok()?;
     let first_line = text.lines().next().unwrap_or("").trim();
-    if !first_line.starts_with("@@@LINK=") {
+    let linked = first_line.strip_prefix("@@@LINK=")?.trim();
+    if linked.is_empty() {
         return None;
     }
+    if !linked.chars().any(|c| c.is_control()) {
+        return Some(linked.to_string());
+    }
 
-    let linked_word = first_line
-        .trim_start_matches("@@@LINK=")
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect::<String>()
-        .trim()
-        .to_string();
-    if linked_word.is_empty() {
-        None
+    let filtered: String = linked.chars().filter(|c| !c.is_control()).collect();
+    let trimmed = filtered.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.len() == filtered.len() {
+        Some(filtered)
     } else {
-        Some(linked_word)
+        Some(trimmed.to_string())
     }
 }
 
@@ -42,7 +45,7 @@ pub(crate) fn lookup_record_in_file(
     file: &Path,
     word: &str,
     max_record_length: Option<usize>,
-) -> Result<Option<Vec<u8>>, QueryError> {
+) -> Result<Option<Bytes>, QueryError> {
     let conn = match state.get_db_connection(file) {
         Ok(c) => c,
         Err(e) => {

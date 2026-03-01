@@ -87,7 +87,7 @@ impl Mdx {
             parse_key_block_info(data, kbh.key_block_info_len, &header)
                 .map_err(|e| anyhow::anyhow!("Failed to parse key block info: {:?}", e))?;
 
-        let (data, entries) = parse_key_blocks(data, kbh.key_blocks_len, &header, &key_blocks_size)
+        let (data, mut entries) = parse_key_blocks(data, kbh.key_blocks_len, &header, &key_blocks_size)
             .map_err(|e| anyhow::anyhow!("Failed to parse key blocks: {:?}", e))?;
 
         let (rest, record_blocks_size) = parse_record_blocks(data, &header)
@@ -96,7 +96,7 @@ impl Mdx {
         let base_offset = input_len - rest.len();
 
         // 计算position耗时，一次计算就保存下来
-        let offset = records_offset(&entries, &record_blocks_size, base_offset);
+        let offset = records_offset(entries.as_mut_slice(), &record_blocks_size, base_offset);
 
         Ok(Mdx {
             records_offset: offset,
@@ -113,8 +113,8 @@ impl Mdx {
 
 /// bytes structure: buf -> block -> record(entry)
 fn records_offset(
-    records_debuf_index: &Vec<RecordDeBufOffset>,
-    record_blocks_size: &Vec<RecordBlockSize>,
+    records_debuf_index: &mut [RecordDeBufOffset],
+    record_blocks_size: &[RecordBlockSize],
     base_offset: usize,
 ) -> Vec<RecordOffsetInfo> {
     // Pre-allocate capacity for better performance
@@ -128,9 +128,10 @@ fn records_offset(
     for block in record_blocks_size {
         while i < records_debuf_index.len() {
             let record = &records_debuf_index[i];
+            let record_offset_in_debuf = record.record_offset_in_debuf;
 
             // 当前entry已经属于下一个block，注意等于号
-            if record.record_offset_in_debuf >= pre_blocks_dsize_sum + block.dsize {
+            if record_offset_in_debuf >= pre_blocks_dsize_sum + block.dsize {
                 break;
             }
 
@@ -143,11 +144,11 @@ fn records_offset(
             };
 
             positions.push(RecordOffsetInfo {
-                text: record.text.to_string(),
+                text: std::mem::take(&mut records_debuf_index[i].text),
                 block_offset_in_buf: base_offset + pre_blocks_csize_sum,
                 block_csize: block.csize,
                 block_dsize: block.dsize,
-                record_start_in_de_block: record.record_offset_in_debuf - pre_blocks_dsize_sum,
+                record_start_in_de_block: record_offset_in_debuf - pre_blocks_dsize_sum,
                 record_end_in_de_block,
             });
             i += 1;

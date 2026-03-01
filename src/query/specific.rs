@@ -3,6 +3,7 @@ use crate::query::{
     MAX_RESOURCE_RECORD_BYTES, QueryError, detect_content_type, extract_link_target,
     lookup_record_in_file, rewrite_html,
 };
+use axum::body::Bytes;
 use std::path::Path;
 use tracing::info;
 
@@ -13,7 +14,7 @@ pub fn query_specific_resource(
     state: &AppState,
     file: &Path,
     key: &str,
-) -> Result<Option<(Vec<u8>, String)>, QueryError> {
+) -> Result<Option<(Bytes, String)>, QueryError> {
     let Some(data) = lookup_record_in_file(state, file, key, Some(MAX_RESOURCE_RECORD_BYTES))?
     else {
         return Ok(None);
@@ -28,7 +29,7 @@ pub fn query_specific_entry(
     file: &Path,
     word: &str,
     dict_id: &str,
-) -> Result<Option<(Vec<u8>, String)>, QueryError> {
+) -> Result<Option<(Bytes, String)>, QueryError> {
     query_specific_entry_internal(state, file, word, dict_id, 0)
 }
 
@@ -38,7 +39,7 @@ fn query_specific_entry_internal(
     word: &str,
     dict_id: &str,
     depth: u8,
-) -> Result<Option<(Vec<u8>, String)>, QueryError> {
+) -> Result<Option<(Bytes, String)>, QueryError> {
     if depth > MAX_REDIRECT_DEPTH {
         return Err(QueryError::TooManyRedirects);
     }
@@ -55,9 +56,14 @@ fn query_specific_entry_internal(
         return query_specific_entry_internal(state, file, &linked_word, dict_id, depth + 1);
     }
 
-    let text = String::from_utf8_lossy(&data).to_string();
-    let rewritten = rewrite_html(&text, dict_id);
-    data = rewritten.into_bytes();
+    let rewritten = match std::str::from_utf8(&data) {
+        Ok(text) => rewrite_html(text, dict_id),
+        Err(_) => {
+            let text = String::from_utf8_lossy(&data);
+            rewrite_html(text.as_ref(), dict_id)
+        }
+    };
+    data = Bytes::from(rewritten);
 
     Ok(Some((data, "text/html".to_string())))
 }

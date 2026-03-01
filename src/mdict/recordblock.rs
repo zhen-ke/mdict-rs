@@ -129,7 +129,7 @@ pub(crate) fn record_block_parser<'a>(
                     }
                 },
                 2 => {
-                    let mut v = vec![];
+                    let mut v = Vec::with_capacity(dsize);
                     match ZlibDecoder::new(&data[..]).read_to_end(&mut v) {
                         Ok(_) => v,
                         Err(e) => {

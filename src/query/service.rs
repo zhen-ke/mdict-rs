@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use axum::body::Bytes;
 use rusqlite::{Connection, named_params};
 use tracing::{debug, info, warn};
 
@@ -16,13 +17,13 @@ use super::specific::query_specific_entry;
 const MAX_REDIRECT_DEPTH: u8 = 5;
 const TRACE_REDIRECT_DEPTH: u8 = 10;
 
-pub fn query(state: &AppState, word: String) -> Result<(Vec<u8>, String), QueryError> {
+pub fn query(state: &AppState, word: String) -> Result<(Bytes, String), QueryError> {
     query_internal(state, word, 0)
 }
 
 /// Aggregate query results from all enabled text dictionaries.
 /// Used by `/query` and `/lucky` so the frontend can show multiple dictionary entries together.
-pub fn query_aggregate(state: &AppState, word: String) -> Result<(Vec<u8>, String), QueryError> {
+pub fn query_aggregate(state: &AppState, word: String) -> Result<(Bytes, String), QueryError> {
     if is_resource_key(&word) {
         return query(state, word);
     }
@@ -156,7 +157,7 @@ fn query_internal(
     state: &AppState,
     word: String,
     depth: u8,
-) -> Result<(Vec<u8>, String), QueryError> {
+) -> Result<(Bytes, String), QueryError> {
     if depth > MAX_REDIRECT_DEPTH {
         return Err(QueryError::TooManyRedirects);
     }
@@ -190,9 +191,14 @@ fn query_internal(
             detect_content_type(&w)
         } else {
             if let Some(dict_id) = state.get_dict_id(file) {
-                let text = String::from_utf8_lossy(&final_data).to_string();
-                let rewritten = rewrite_html(&text, &dict_id);
-                final_data = rewritten.into_bytes();
+                let rewritten = match std::str::from_utf8(&final_data) {
+                    Ok(text) => rewrite_html(text, &dict_id),
+                    Err(_) => {
+                        let text = String::from_utf8_lossy(&final_data);
+                        rewrite_html(text.as_ref(), &dict_id)
+                    }
+                };
+                final_data = Bytes::from(rewritten);
             }
             "text/html".to_string()
         };
@@ -214,7 +220,7 @@ fn get_link_target(state: &AppState, word: &str) -> Option<String> {
     None
 }
 
-fn query_aggregate_entries(state: &AppState, word: &str) -> Result<(Vec<u8>, String), QueryError> {
+fn query_aggregate_entries(state: &AppState, word: &str) -> Result<(Bytes, String), QueryError> {
     let mut sections = Vec::new();
 
     for file in state.dict_text_files() {
@@ -224,7 +230,10 @@ fn query_aggregate_entries(state: &AppState, word: &str) -> Result<(Vec<u8>, Str
 
         match query_specific_entry(state, file, word, &dict_id) {
             Ok(Some((data, _))) => {
-                let body = String::from_utf8_lossy(&data).to_string();
+                let body = match std::str::from_utf8(&data) {
+                    Ok(text) => text.to_owned(),
+                    Err(_) => String::from_utf8_lossy(&data).into_owned(),
+                };
                 let title = state.get_dict_display_name(file);
                 let container_class = state.get_dict_container_class(file);
                 sections.push(AggregateSection {
@@ -249,7 +258,7 @@ fn query_aggregate_entries(state: &AppState, word: &str) -> Result<(Vec<u8>, Str
     }
 
     let html = render_aggregate_html(word, &sections);
-    Ok((html.into_bytes(), "text/html".to_string()))
+    Ok((Bytes::from(html), "text/html".to_string()))
 }
 
 fn merge_prefix_fallback(

@@ -64,7 +64,6 @@ pub(crate) async fn handle_query(
 
     match result {
         Ok((data, content_type)) => {
-            let data = Bytes::from(data);
             state.put_entry_cached(cache_key, data.clone(), content_type.clone());
             state.clear_negative_cache(&negative_key);
             Ok(ok_response(data, &content_type))
@@ -100,7 +99,6 @@ pub(crate) async fn handle_lucky(State(state): State<AppState>) -> Result<Respon
 
     match result {
         Ok((data, content_type)) => {
-            let data = Bytes::from(data);
             state.put_entry_cached(cache_key, data.clone(), content_type.clone());
             state.clear_negative_cache(&negative_key);
             Ok(ok_response(data, &content_type))
@@ -240,7 +238,6 @@ pub(crate) async fn handle_resource(
 
     match result {
         Ok(Some((data, content_type))) => {
-            let data = Bytes::from(data);
             if should_cache_resource(&content_type, data.len()) {
                 state.put_resource_cached(cache_key, data.clone(), content_type.clone());
             }
@@ -304,7 +301,6 @@ pub(crate) async fn handle_dict_entry(
 
     match result {
         Ok(Some((data, content_type))) => {
-            let data = Bytes::from(data);
             state.put_entry_cached(cache_key, data.clone(), content_type.clone());
             state.clear_negative_cache(&negative_key);
             ok_response(data, &content_type)
@@ -397,7 +393,6 @@ async fn query_dict_resource(
 
         match result {
             Ok(Some((data, content_type))) => {
-                let data = Bytes::from(data);
                 if should_cache_resource(&content_type, data.len()) {
                     state.put_resource_cached(cache_key, data.clone(), content_type.clone());
                 }

@@ -551,7 +551,7 @@ fn key_block_parser<'a>(input: &'a [u8], csize: usize, dsize: usize) -> IResult<
             })?
         }
         2 => {
-            let mut v = vec![];
+            let mut v = Vec::with_capacity(dsize);
             ZlibDecoder::new(&data[..])
                 .read_to_end(&mut v)
                 .map_err(|_| {

@@ -1,8 +1,9 @@
 use std::fs::File;
 use std::num::NonZeroUsize;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
+use axum::body::Bytes;
 use crate::mdict::recordblock::record_block_parser;
 use lru::LruCache;
 use memmap2::MmapOptions;
@@ -19,7 +20,7 @@ struct BlockKey {
 
 pub struct MdxReader {
     mmap: memmap2::Mmap,
-    block_cache: Mutex<LruCache<BlockKey, Arc<Vec<u8>>>>,
+    block_cache: Mutex<LruCache<BlockKey, Bytes>>,
 }
 
 impl MdxReader {
@@ -40,7 +41,7 @@ impl MdxReader {
         block_dsize: usize,
         record_offset: usize,
         record_length: usize,
-    ) -> anyhow::Result<Vec<u8>> {
+    ) -> anyhow::Result<Bytes> {
         if block_offset + block_csize > self.mmap.len() {
             return Err(anyhow::anyhow!(
                 "Block out of bounds: offset {} + size {} > file size {}",
@@ -68,7 +69,7 @@ impl MdxReader {
             let (_, decompressed) = record_block_parser(block_csize, block_dsize)
                 .parse(block_buf)
                 .map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
-            let decompressed = Arc::new(decompressed);
+            let decompressed = Bytes::from(decompressed);
             self.block_cache
                 .lock()
                 .expect("block cache mutex poisoned")
@@ -86,7 +87,6 @@ impl MdxReader {
             ));
         }
 
-        let record_slice = &block_decompressed[record_offset..record_offset + record_length];
-        Ok(record_slice.to_vec())
+        Ok(block_decompressed.slice(record_offset..record_offset + record_length))
     }
 }
