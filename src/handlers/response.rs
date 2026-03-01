@@ -1,4 +1,5 @@
 use axum::{
+    body::Bytes,
     http::{
         HeaderMap, StatusCode,
         header::{
@@ -9,7 +10,8 @@ use axum::{
 };
 
 /// Build a successful response with content type
-pub fn ok_response(data: Vec<u8>, content_type: &str) -> Response {
+pub fn ok_response(data: impl Into<Bytes>, content_type: &str) -> Response {
+    let data: Bytes = data.into();
     axum::http::Response::builder()
         .header("Content-Type", content_type)
         .body(data.into())
@@ -43,11 +45,12 @@ pub fn not_found() -> Response {
 
 /// Build a cacheable binary response with optional ETag revalidation and byte-range support.
 pub fn cacheable_binary_response(
-    data: Vec<u8>,
+    data: impl Into<Bytes>,
     content_type: &str,
     cache_control: &str,
     request_headers: Option<&HeaderMap>,
 ) -> Response {
+    let data: Bytes = data.into();
     let etag = build_etag(&data);
     let total_len = data.len();
 
@@ -73,7 +76,7 @@ pub fn cacheable_binary_response(
         if range_header.trim().starts_with("bytes=") {
             return match parse_single_range(range_header, total_len) {
                 Some((start, end)) => {
-                    let chunk = data[start..=end].to_vec();
+                    let chunk = data.slice(start..(end + 1));
                     let chunk_len = chunk.len();
                     axum::http::Response::builder()
                         .status(StatusCode::PARTIAL_CONTENT)

@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use std::path::Path as FsPath;
 
 use axum::{
+    body::Bytes,
     extract::{Form, Path, Query, State},
     http::{HeaderMap, Uri},
     response::{Json, Response},
@@ -58,6 +59,7 @@ pub(crate) async fn handle_query(
 
     match result {
         Ok((data, content_type)) => {
+            let data = Bytes::from(data);
             state.put_entry_cached(cache_key, data.clone(), content_type.clone());
             state.clear_negative_cache(&negative_key);
             Ok(ok_response(data, &content_type))
@@ -92,6 +94,7 @@ pub(crate) async fn handle_lucky(State(state): State<AppState>) -> Result<Respon
 
     match result {
         Ok((data, content_type)) => {
+            let data = Bytes::from(data);
             state.put_entry_cached(cache_key, data.clone(), content_type.clone());
             state.clear_negative_cache(&negative_key);
             Ok(ok_response(data, &content_type))
@@ -173,6 +176,7 @@ pub(crate) async fn handle_resource(
     if let Some((data, content_type)) =
         read_static_file(state.static_dir(), path.trim_start_matches('/'), true).await
     {
+        let data = Bytes::from(data);
         state.put_resource_cached(cache_key, data.clone(), content_type.clone());
         state.clear_negative_cache(&negative_key);
         return cacheable_binary_response(
@@ -203,6 +207,7 @@ pub(crate) async fn handle_resource(
 
     match result {
         Ok(Some((data, content_type))) => {
+            let data = Bytes::from(data);
             state.put_resource_cached(cache_key, data.clone(), content_type.clone());
             state.clear_negative_cache(&negative_key);
             cacheable_binary_response(data, &content_type, RESOURCE_CACHE_CONTROL, Some(&headers))
@@ -261,6 +266,7 @@ pub(crate) async fn handle_dict_entry(
 
     match result {
         Ok(Some((data, content_type))) => {
+            let data = Bytes::from(data);
             state.put_entry_cached(cache_key, data.clone(), content_type.clone());
             state.clear_negative_cache(&negative_key);
             ok_response(data, &content_type)
@@ -350,6 +356,7 @@ async fn query_dict_resource(
 
         match result {
             Ok(Some((data, content_type))) => {
+                let data = Bytes::from(data);
                 state.put_resource_cached(cache_key, data.clone(), content_type.clone());
                 state.clear_negative_cache(&negative_key);
                 return cacheable_binary_response(
@@ -368,6 +375,7 @@ async fn query_dict_resource(
 
     // Fallback: serve static assets for dictionary-rendered pages (e.g. lm6.css/lm6.js).
     if let Some((data, content_type)) = read_static_file(state.static_dir(), &path, false).await {
+        let data = Bytes::from(data);
         state.put_resource_cached(cache_key, data.clone(), content_type.clone());
         state.clear_negative_cache(&negative_key);
         return cacheable_binary_response(

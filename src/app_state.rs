@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use axum::body::Bytes;
 use lru::LruCache;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -21,7 +22,7 @@ const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(20);
 
 #[derive(Clone)]
 struct CachedPayload {
-    data: Vec<u8>,
+    data: Bytes,
     content_type: String,
     expires_at: Instant,
 }
@@ -42,8 +43,8 @@ pub struct AppState {
     dict_id_map: Arc<HashMap<String, Vec<PathBuf>>>,
     path_to_id: Arc<HashMap<PathBuf, String>>,
 
-    db_pools: Arc<Mutex<HashMap<PathBuf, Pool<SqliteConnectionManager>>>>,
-    mdx_readers: Arc<Mutex<HashMap<PathBuf, Arc<MdxReader>>>>,
+    db_pools: Arc<RwLock<HashMap<PathBuf, Pool<SqliteConnectionManager>>>>,
+    mdx_readers: Arc<RwLock<HashMap<PathBuf, Arc<MdxReader>>>>,
     entry_cache: Arc<Mutex<LruCache<String, CachedPayload>>>,
     resource_cache: Arc<Mutex<LruCache<String, CachedPayload>>>,
     negative_cache: Arc<Mutex<LruCache<String, Instant>>>,
@@ -122,8 +123,8 @@ impl AppState {
             id_to_primary_text: Arc::new(id_to_primary_text),
             dict_id_map: Arc::new(dict_id_map),
             path_to_id: Arc::new(path_to_id),
-            db_pools: Arc::new(Mutex::new(HashMap::new())),
-            mdx_readers: Arc::new(Mutex::new(HashMap::new())),
+            db_pools: Arc::new(RwLock::new(HashMap::new())),
+            mdx_readers: Arc::new(RwLock::new(HashMap::new())),
             entry_cache: Arc::new(Mutex::new(LruCache::new(
                 NonZeroUsize::new(ENTRY_CACHE_SIZE).expect("ENTRY_CACHE_SIZE > 0"),
             ))),
@@ -278,8 +279,8 @@ impl AppState {
         let dict_file = dict_file.to_path_buf();
         if let Some(pool) = self
             .db_pools
-            .lock()
-            .expect("db_pools mutex poisoned")
+            .read()
+            .expect("db_pools rwlock poisoned")
             .get(&dict_file)
             .cloned()
         {
@@ -293,10 +294,10 @@ impl AppState {
             return Err(anyhow::anyhow!("Database file not found: {:?}", db_file));
         }
 
-        let pool = Self::build_pool(&db_file)?;
+        let built_pool = Self::build_pool(&db_file)?;
         let pool = {
-            let mut guard = self.db_pools.lock().expect("db_pools mutex poisoned");
-            guard.entry(dict_file).or_insert(pool).clone()
+            let mut guard = self.db_pools.write().expect("db_pools rwlock poisoned");
+            guard.entry(dict_file).or_insert(built_pool).clone()
         };
 
         pool.get()
@@ -307,8 +308,8 @@ impl AppState {
         let dict_file = dict_file.to_path_buf();
         if let Some(reader) = self
             .mdx_readers
-            .lock()
-            .expect("mdx_readers mutex poisoned")
+            .read()
+            .expect("mdx_readers rwlock poisoned")
             .get(&dict_file)
             .cloned()
         {
@@ -316,24 +317,29 @@ impl AppState {
         }
 
         let reader = Arc::new(MdxReader::new(&dict_file)?);
-        let mut map = self.mdx_readers.lock().expect("mdx_readers mutex poisoned");
-        let entry = map.entry(dict_file).or_insert_with(|| reader.clone());
-        Ok(entry.clone())
+        let entry = {
+            let mut guard = self
+                .mdx_readers
+                .write()
+                .expect("mdx_readers rwlock poisoned");
+            guard.entry(dict_file).or_insert(reader).clone()
+        };
+        Ok(entry)
     }
 
-    pub fn get_entry_cached(&self, key: &str) -> Option<(Vec<u8>, String)> {
+    pub fn get_entry_cached(&self, key: &str) -> Option<(Bytes, String)> {
         Self::cache_get(&self.entry_cache, key)
     }
 
-    pub fn put_entry_cached(&self, key: String, data: Vec<u8>, content_type: String) {
+    pub fn put_entry_cached(&self, key: String, data: Bytes, content_type: String) {
         Self::cache_put(&self.entry_cache, key, data, content_type, ENTRY_CACHE_TTL);
     }
 
-    pub fn get_resource_cached(&self, key: &str) -> Option<(Vec<u8>, String)> {
+    pub fn get_resource_cached(&self, key: &str) -> Option<(Bytes, String)> {
         Self::cache_get(&self.resource_cache, key)
     }
 
-    pub fn put_resource_cached(&self, key: String, data: Vec<u8>, content_type: String) {
+    pub fn put_resource_cached(&self, key: String, data: Bytes, content_type: String) {
         Self::cache_put(
             &self.resource_cache,
             key,
@@ -415,7 +421,7 @@ impl AppState {
     fn cache_get(
         cache: &Arc<Mutex<LruCache<String, CachedPayload>>>,
         key: &str,
-    ) -> Option<(Vec<u8>, String)> {
+    ) -> Option<(Bytes, String)> {
         let now = Instant::now();
         let mut cache = cache.lock().expect("cache mutex poisoned");
         if let Some(payload) = cache.get(key).cloned() {
@@ -430,7 +436,7 @@ impl AppState {
     fn cache_put(
         cache: &Arc<Mutex<LruCache<String, CachedPayload>>>,
         key: String,
-        data: Vec<u8>,
+        data: Bytes,
         content_type: String,
         ttl: Duration,
     ) {
