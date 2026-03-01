@@ -38,28 +38,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let static_dir = static_path()?;
 
     // 扫描词典文件
-    let mut dict_files = scan_dict_files(&dict_dir);
+    let dict_files = scan_dict_files(&dict_dir);
 
     // 确保索引已生成（首次启动会花时间；后续有 .db 则很快）
     if !dict_files.is_empty() {
         let files = dict_files.clone();
-        info!("Ensuring indexes for {} dictionary files", files.len());
-        match tokio::task::spawn_blocking(move || indexing(&files, false)).await {
-            Ok(Ok(())) => info!("Indexing completed"),
-            Ok(Err(e)) => error!("Indexing finished with errors: {}", e),
-            Err(e) => error!("Indexing task failed: {}", e),
-        }
-
-        // 过滤掉没有生成 db 的词典文件，避免运行时查询报错
-        dict_files.retain(|file| {
-            let db = db_path(file);
-            if db.exists() {
-                true
-            } else {
-                error!("Skipping dict {:?}: missing db {:?}", file, db);
-                false
-            }
+        info!(
+            "Scheduling background index ensure for {} dictionary files",
+            files.len()
+        );
+        tokio::task::spawn_blocking(move || match indexing(&files, false) {
+            Ok(()) => info!("Background indexing completed"),
+            Err(e) => error!("Background indexing finished with errors: {}", e),
         });
+
+        let missing: usize = dict_files
+            .iter()
+            .filter(|file| !db_path(file).exists())
+            .count();
+        if missing > 0 {
+            info!(
+                "{} dictionary indexes are pending and will be available after background indexing",
+                missing
+            );
+        }
     }
 
     info!("Using dict dir: {:?}", dict_dir);

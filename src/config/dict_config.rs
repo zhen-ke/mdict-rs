@@ -119,7 +119,7 @@ impl DictConfig {
 /// Dictionary info for API response
 #[derive(Debug, Clone, serde_derive::Serialize)]
 pub struct DictInfo {
-    /// Internal ID (file path)
+    /// Stable dictionary ID used by route `/dict/{id}/...`
     pub id: String,
 
     /// Display name

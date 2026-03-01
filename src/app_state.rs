@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use lru::LruCache;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
+use ripemd::{Digest, Ripemd160};
 
 use crate::config::{DictConfig, DictInfo};
 use crate::mdict::reader::MdxReader;
@@ -33,11 +34,13 @@ pub struct AppState {
     dict_text_files: Arc<Vec<PathBuf>>,
     dict_resource_files: Arc<Vec<PathBuf>>,
 
-    dict_configs: Arc<HashMap<PathBuf, DictConfig>>,
+    dict_configs_by_path: Arc<HashMap<PathBuf, DictConfig>>,
+    dict_configs_by_id: Arc<HashMap<String, DictConfig>>,
+    id_to_primary_text: Arc<HashMap<String, PathBuf>>,
 
     // Mapping between ID and File Path
-    pub dict_id_map: Arc<HashMap<String, Vec<PathBuf>>>,
-    pub path_to_id: Arc<HashMap<PathBuf, String>>,
+    dict_id_map: Arc<HashMap<String, Vec<PathBuf>>>,
+    path_to_id: Arc<HashMap<PathBuf, String>>,
 
     db_pools: Arc<Mutex<HashMap<PathBuf, Pool<SqliteConnectionManager>>>>,
     mdx_readers: Arc<Mutex<HashMap<PathBuf, Arc<MdxReader>>>>,
@@ -66,27 +69,23 @@ impl AppState {
         mdd.extend(mdx);
         let dict_resource_files = mdd;
 
-        let mut configs = HashMap::new();
+        let mut configs_by_path = HashMap::new();
         for file in &dict_text_files {
             if let Some(cfg) = DictConfig::load(file) {
-                configs.insert(file.clone(), cfg);
+                configs_by_path.insert(file.clone(), cfg);
             }
         }
 
         // Initialize ID mappings
         let mut dict_id_map: HashMap<String, Vec<PathBuf>> = HashMap::new();
         let mut path_to_id = HashMap::new();
+        let mut id_to_logical = HashMap::new();
 
         // Generate IDs for all files
         for file in &dict_files {
             // Use file stem + parent path to identify "logical dictionary"
-            let file_stem = file.file_stem().unwrap_or_default();
-            let parent = file.parent().unwrap_or(Path::new(""));
-            let logical_path = parent.join(file_stem);
-
-            let path_str = logical_path.to_string_lossy().to_string().to_lowercase();
-            let hash = adler32::adler32(path_str.as_bytes()).unwrap();
-            let id = format!("{:x}", hash);
+            let logical_key = Self::logical_dict_key(file);
+            let id = Self::allocate_dict_id(&logical_key, &mut id_to_logical);
 
             dict_id_map
                 .entry(id.clone())
@@ -95,12 +94,32 @@ impl AppState {
             path_to_id.insert(file.clone(), id);
         }
 
+        let mut id_to_primary_text = HashMap::new();
+        let mut configs_by_id = HashMap::new();
+        for (id, files) in &dict_id_map {
+            let mut text_files: Vec<PathBuf> = files
+                .iter()
+                .filter(|f| Self::is_mdx_file(f))
+                .cloned()
+                .collect();
+            text_files.sort();
+
+            if let Some(primary_text) = text_files.into_iter().next() {
+                id_to_primary_text.insert(id.clone(), primary_text.clone());
+                if let Some(cfg) = configs_by_path.get(&primary_text) {
+                    configs_by_id.insert(id.clone(), cfg.clone());
+                }
+            }
+        }
+
         Self {
             dict_dir: Arc::new(dict_dir),
             static_dir: Arc::new(static_dir),
             dict_text_files: Arc::new(dict_text_files),
             dict_resource_files: Arc::new(dict_resource_files),
-            dict_configs: Arc::new(configs),
+            dict_configs_by_path: Arc::new(configs_by_path),
+            dict_configs_by_id: Arc::new(configs_by_id),
+            id_to_primary_text: Arc::new(id_to_primary_text),
             dict_id_map: Arc::new(dict_id_map),
             path_to_id: Arc::new(path_to_id),
             db_pools: Arc::new(Mutex::new(HashMap::new())),
@@ -178,38 +197,49 @@ impl AppState {
     }
 
     pub fn get_dict_config(&self, dict_id: &str) -> Option<DictConfig> {
+        if let Some(cfg) = self.dict_configs_by_id.get(dict_id) {
+            return Some(cfg.clone());
+        }
+
+        // Backward compatibility for older clients that still send file paths as id.
         let path = PathBuf::from(dict_id);
-        self.dict_configs.get(&path).cloned()
+        self.dict_configs_by_path.get(&path).cloned()
     }
 
     pub fn get_all_dict_info(&self) -> Vec<DictInfo> {
-        self.dict_text_files
-            .iter()
-            .map(|file| {
+        let mut ids: Vec<&String> = self.id_to_primary_text.keys().collect();
+        ids.sort();
+
+        ids.into_iter()
+            .filter_map(|id| {
+                let file = self.id_to_primary_text.get(id)?;
                 let default_config = DictConfig::default();
-                let cfg = self.dict_configs.get(file).unwrap_or(&default_config);
-                DictInfo {
-                    id: file.to_string_lossy().to_string(),
+                let cfg = self
+                    .dict_configs_by_path
+                    .get(file)
+                    .unwrap_or(&default_config);
+                Some(DictInfo {
+                    id: id.clone(),
                     name: cfg.get_display_name(file),
                     description: cfg.description.clone(),
                     container_class: cfg.container_class.clone(),
                     has_css: cfg.css.is_some(),
                     has_js: cfg.js.is_some(),
-                }
+                })
             })
             .collect()
     }
 
     pub fn get_dict_display_name(&self, dict_path: &Path) -> String {
         let default_config = DictConfig::default();
-        self.dict_configs
+        self.dict_configs_by_path
             .get(dict_path)
             .unwrap_or(&default_config)
             .get_display_name(dict_path)
     }
 
     pub fn get_dict_container_class(&self, dict_path: &Path) -> Option<String> {
-        self.dict_configs
+        self.dict_configs_by_path
             .get(dict_path)
             .and_then(|cfg| cfg.container_class.clone())
     }
@@ -353,6 +383,35 @@ impl AppState {
             .is_some_and(|e| e.eq_ignore_ascii_case("mdd"))
     }
 
+    fn logical_dict_key(file: &Path) -> String {
+        let file_stem = file.file_stem().unwrap_or_default();
+        let parent = file.parent().unwrap_or(Path::new(""));
+        parent
+            .join(file_stem)
+            .to_string_lossy()
+            .to_string()
+            .to_lowercase()
+    }
+
+    fn allocate_dict_id(logical_key: &str, id_to_logical: &mut HashMap<String, String>) -> String {
+        let mut hasher = Ripemd160::new();
+        hasher.update(logical_key.as_bytes());
+        let base_id = format!("{:x}", hasher.finalize());
+
+        let mut id = base_id.clone();
+        let mut suffix: u32 = 1;
+        while let Some(existing_key) = id_to_logical.get(&id) {
+            if existing_key == logical_key {
+                return id;
+            }
+            id = format!("{}-{}", base_id, suffix);
+            suffix += 1;
+        }
+
+        id_to_logical.insert(id.clone(), logical_key.to_string());
+        id
+    }
+
     fn cache_get(
         cache: &Arc<Mutex<LruCache<String, CachedPayload>>>,
         key: &str,
@@ -384,5 +443,32 @@ impl AppState {
             .lock()
             .expect("cache mutex poisoned")
             .put(key, payload);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppState;
+    use std::collections::HashMap;
+
+    #[test]
+    fn dict_id_allocation_is_stable_for_same_key() {
+        let mut id_to_logical = HashMap::new();
+        let id1 = AppState::allocate_dict_id("dict-key", &mut id_to_logical);
+        let id2 = AppState::allocate_dict_id("dict-key", &mut id_to_logical);
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn dict_id_allocation_adds_suffix_when_collision_detected() {
+        let mut id_to_logical = HashMap::new();
+        let base = AppState::allocate_dict_id("dict-key", &mut id_to_logical);
+
+        // Simulate a rare hash collision on the base ID.
+        id_to_logical.insert(base.clone(), "other-dict-key".to_string());
+        let resolved = AppState::allocate_dict_id("dict-key", &mut id_to_logical);
+
+        assert_ne!(resolved, base);
+        assert!(resolved.starts_with(&(base + "-")));
     }
 }

@@ -1,3 +1,4 @@
+use crate::query::QueryError;
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -42,13 +43,14 @@ impl IntoResponse for AppError {
     }
 }
 
-/// Convert query module errors (String) to AppError
-impl From<String> for AppError {
-    fn from(err: String) -> Self {
-        if err == "not found" {
-            AppError::NotFound
-        } else {
-            AppError::Internal(err)
+/// Convert query module errors to AppError
+impl From<QueryError> for AppError {
+    fn from(err: QueryError) -> Self {
+        match err {
+            QueryError::NotFound => AppError::NotFound,
+            QueryError::InvalidInput(msg) => AppError::BadRequest(msg),
+            QueryError::TooManyRedirects => AppError::Internal("Too many redirects".to_string()),
+            QueryError::Internal(msg) => AppError::Internal(msg),
         }
     }
 }

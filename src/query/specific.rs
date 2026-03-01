@@ -1,5 +1,7 @@
 use crate::app_state::AppState;
-use crate::query::{detect_content_type, extract_link_target, lookup_record_in_file, rewrite_html};
+use crate::query::{
+    QueryError, detect_content_type, extract_link_target, lookup_record_in_file, rewrite_html,
+};
 use std::path::Path;
 use tracing::info;
 
@@ -10,7 +12,7 @@ pub fn query_specific_resource(
     state: &AppState,
     file: &Path,
     key: &str,
-) -> Result<Option<(Vec<u8>, String)>, String> {
+) -> Result<Option<(Vec<u8>, String)>, QueryError> {
     let Some(data) = lookup_record_in_file(state, file, key)? else {
         return Ok(None);
     };
@@ -24,7 +26,7 @@ pub fn query_specific_entry(
     file: &Path,
     word: &str,
     dict_id: &str,
-) -> Result<Option<(Vec<u8>, String)>, String> {
+) -> Result<Option<(Vec<u8>, String)>, QueryError> {
     query_specific_entry_internal(state, file, word, dict_id, 0)
 }
 
@@ -34,9 +36,9 @@ fn query_specific_entry_internal(
     word: &str,
     dict_id: &str,
     depth: u8,
-) -> Result<Option<(Vec<u8>, String)>, String> {
+) -> Result<Option<(Vec<u8>, String)>, QueryError> {
     if depth > MAX_REDIRECT_DEPTH {
-        return Err("too many redirects".to_string());
+        return Err(QueryError::TooManyRedirects);
     }
 
     let Some(mut data) = lookup_record_in_file(state, file, word)? else {

@@ -8,8 +8,8 @@ use crate::app_state::AppState;
 use crate::config::DictInfo;
 use crate::lucky;
 use crate::query::{
-    query, query_aggregate, query_specific_entry, query_specific_resource, query_with_trace,
-    suggest,
+    QueryError, query, query_aggregate, query_specific_entry, query_specific_resource,
+    query_with_trace, suggest,
 };
 use serde_derive::Deserialize;
 use std::collections::HashSet;
@@ -63,7 +63,7 @@ pub(crate) async fn handle_query(
             Ok(ok_response(data, &content_type))
         }
         Err(e) => {
-            if e == "not found" {
+            if matches!(e, QueryError::NotFound) {
                 state.put_negative_cache(negative_key);
             }
             Err(AppError::from(e))
@@ -97,7 +97,7 @@ pub(crate) async fn handle_lucky(State(state): State<AppState>) -> Result<Respon
             Ok(ok_response(data, &content_type))
         }
         Err(e) => {
-            if e == "not found" {
+            if matches!(e, QueryError::NotFound) {
                 state.put_negative_cache(negative_key);
             }
             Err(AppError::from(e))
@@ -141,7 +141,7 @@ pub(crate) async fn handle_trace(
             "final_word": final_word,
         })),
         Ok(Err(e)) => Json(serde_json::json!({
-            "error": e,
+            "error": e.to_string(),
         })),
         Err(e) => Json(serde_json::json!({
             "error": format!("trace task failed: {}", e),
@@ -524,7 +524,7 @@ fn negative_key(cache_key: &str) -> String {
 
 #[derive(Deserialize, Debug)]
 pub struct DictQuery {
-    /// Dictionary ID (file path) or name
+    /// Dictionary ID (stable hash from /api/dicts, path is still accepted for compatibility)
     pub id: Option<String>,
 }
 
