@@ -1,5 +1,5 @@
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     http::{
         HeaderMap, StatusCode,
         header::{
@@ -8,6 +8,9 @@ use axum::{
     },
     response::Response,
 };
+use std::path::Path;
+use tokio::fs::File;
+use tokio_util::io::ReaderStream;
 
 /// Build a successful response with content type
 pub fn ok_response(data: impl Into<Bytes>, content_type: &str) -> Response {
@@ -113,6 +116,28 @@ pub fn cacheable_binary_response(
         .header(CACHE_CONTROL, cache_control)
         .body(data.into())
         .unwrap()
+}
+
+/// Build a streaming response from a filesystem file.
+pub async fn stream_file_response(
+    path: &Path,
+    content_type: &str,
+    cache_control: &str,
+) -> Option<Response> {
+    let file = File::open(path).await.ok()?;
+    let total_len = file.metadata().await.ok()?.len();
+    let stream = ReaderStream::new(file);
+    let body = Body::from_stream(stream);
+
+    Some(
+        axum::http::Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", content_type)
+            .header(CONTENT_LENGTH, total_len.to_string())
+            .header(CACHE_CONTROL, cache_control)
+            .body(body)
+            .unwrap(),
+    )
 }
 
 fn build_etag(data: &[u8]) -> String {

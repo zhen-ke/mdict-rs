@@ -7,6 +7,8 @@ use crate::app_state::AppState;
 
 use super::error::QueryError;
 
+pub(crate) const MAX_RESOURCE_RECORD_BYTES: usize = 32 * 1024 * 1024;
+
 pub(crate) fn detect_content_type(word: &str) -> String {
     mime_guess::from_path(word)
         .first_or_octet_stream()
@@ -39,6 +41,7 @@ pub(crate) fn lookup_record_in_file(
     state: &AppState,
     file: &Path,
     word: &str,
+    max_record_length: Option<usize>,
 ) -> Result<Option<Vec<u8>>, QueryError> {
     let conn = match state.get_db_connection(file) {
         Ok(c) => c,
@@ -72,6 +75,15 @@ pub(crate) fn lookup_record_in_file(
     let record_length: usize = row
         .get(1)
         .map_err(|e| QueryError::Internal(format!("decode record_length failed: {}", e)))?;
+    if let Some(max) = max_record_length {
+        if record_length > max {
+            debug!(
+                "skip oversized record {} bytes > {} for key '{}' in {:?}",
+                record_length, max, word, file
+            );
+            return Ok(None);
+        }
+    }
     let block_offset: usize = row
         .get(2)
         .map_err(|e| QueryError::Internal(format!("decode block_offset failed: {}", e)))?;

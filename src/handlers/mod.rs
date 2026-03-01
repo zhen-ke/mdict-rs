@@ -2,7 +2,10 @@ mod error;
 mod response;
 
 pub use error::AppError;
-use response::{cacheable_binary_response, css_response, js_response, not_found, ok_response};
+use response::{
+    cacheable_binary_response, css_response, js_response, not_found, ok_response,
+    stream_file_response,
+};
 
 use crate::app_state::AppState;
 use crate::config::DictInfo;
@@ -13,7 +16,7 @@ use crate::query::{
 };
 use serde_derive::Deserialize;
 use std::collections::HashSet;
-use std::path::Path as FsPath;
+use std::path::{Path as FsPath, PathBuf};
 
 use axum::{
     body::Bytes,
@@ -24,6 +27,8 @@ use axum::{
 use tokio::fs;
 
 const RESOURCE_CACHE_CONTROL: &str = "public, max-age=86400, immutable";
+const MAX_CACHEABLE_RESOURCE_BYTES: usize = 1024 * 1024;
+const MAX_CACHEABLE_MEDIA_BYTES: usize = 256 * 1024;
 
 #[derive(Deserialize, Debug)]
 pub struct SuggestQuery {
@@ -173,18 +178,40 @@ pub(crate) async fn handle_resource(
         return not_found();
     }
 
-    if let Some((data, content_type)) =
-        read_static_file(state.static_dir(), path.trim_start_matches('/'), true).await
+    if let Some(static_file) =
+        resolve_static_file(state.static_dir(), path.trim_start_matches('/'), true).await
     {
-        let data = Bytes::from(data);
-        state.put_resource_cached(cache_key, data.clone(), content_type.clone());
-        state.clear_negative_cache(&negative_key);
-        return cacheable_binary_response(
-            data,
-            &content_type,
+        if should_cache_resource(&static_file.content_type, static_file.size) {
+            match fs::read(&static_file.path).await {
+                Ok(data) => {
+                    let data = Bytes::from(data);
+                    state.put_resource_cached(
+                        cache_key,
+                        data.clone(),
+                        static_file.content_type.clone(),
+                    );
+                    state.clear_negative_cache(&negative_key);
+                    return cacheable_binary_response(
+                        data,
+                        &static_file.content_type,
+                        RESOURCE_CACHE_CONTROL,
+                        Some(&headers),
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to read static file {:?}: {}", static_file.path, e);
+                }
+            }
+        } else if let Some(resp) = stream_file_response(
+            &static_file.path,
+            &static_file.content_type,
             RESOURCE_CACHE_CONTROL,
-            Some(&headers),
-        );
+        )
+        .await
+        {
+            state.clear_negative_cache(&negative_key);
+            return resp;
+        }
     }
 
     let candidates = build_resource_candidates(path);
@@ -208,7 +235,9 @@ pub(crate) async fn handle_resource(
     match result {
         Ok(Some((data, content_type))) => {
             let data = Bytes::from(data);
-            state.put_resource_cached(cache_key, data.clone(), content_type.clone());
+            if should_cache_resource(&content_type, data.len()) {
+                state.put_resource_cached(cache_key, data.clone(), content_type.clone());
+            }
             state.clear_negative_cache(&negative_key);
             cacheable_binary_response(data, &content_type, RESOURCE_CACHE_CONTROL, Some(&headers))
         }
@@ -357,7 +386,9 @@ async fn query_dict_resource(
         match result {
             Ok(Some((data, content_type))) => {
                 let data = Bytes::from(data);
-                state.put_resource_cached(cache_key, data.clone(), content_type.clone());
+                if should_cache_resource(&content_type, data.len()) {
+                    state.put_resource_cached(cache_key, data.clone(), content_type.clone());
+                }
                 state.clear_negative_cache(&negative_key);
                 return cacheable_binary_response(
                     data,
@@ -374,16 +405,38 @@ async fn query_dict_resource(
     }
 
     // Fallback: serve static assets for dictionary-rendered pages (e.g. lm6.css/lm6.js).
-    if let Some((data, content_type)) = read_static_file(state.static_dir(), &path, false).await {
-        let data = Bytes::from(data);
-        state.put_resource_cached(cache_key, data.clone(), content_type.clone());
-        state.clear_negative_cache(&negative_key);
-        return cacheable_binary_response(
-            data,
-            &content_type,
+    if let Some(static_file) = resolve_static_file(state.static_dir(), &path, false).await {
+        if should_cache_resource(&static_file.content_type, static_file.size) {
+            match fs::read(&static_file.path).await {
+                Ok(data) => {
+                    let data = Bytes::from(data);
+                    state.put_resource_cached(
+                        cache_key,
+                        data.clone(),
+                        static_file.content_type.clone(),
+                    );
+                    state.clear_negative_cache(&negative_key);
+                    return cacheable_binary_response(
+                        data,
+                        &static_file.content_type,
+                        RESOURCE_CACHE_CONTROL,
+                        Some(&headers),
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to read static file {:?}: {}", static_file.path, e);
+                }
+            }
+        } else if let Some(resp) = stream_file_response(
+            &static_file.path,
+            &static_file.content_type,
             RESOURCE_CACHE_CONTROL,
-            Some(&headers),
-        );
+        )
+        .await
+        {
+            state.clear_negative_cache(&negative_key);
+            return resp;
+        }
     }
 
     state.put_negative_cache(negative_key);
@@ -444,11 +497,29 @@ fn build_entry_candidates(word: &str) -> Vec<String> {
     candidates
 }
 
-async fn read_static_file(
+struct StaticFileRef {
+    path: PathBuf,
+    content_type: String,
+    size: usize,
+}
+
+fn should_cache_resource(content_type: &str, size: usize) -> bool {
+    let is_media = content_type.starts_with("image/")
+        || content_type.starts_with("audio/")
+        || content_type.starts_with("video/");
+    let limit = if is_media {
+        MAX_CACHEABLE_MEDIA_BYTES
+    } else {
+        MAX_CACHEABLE_RESOURCE_BYTES
+    };
+    size <= limit
+}
+
+async fn resolve_static_file(
     base_static_dir: &FsPath,
     relative_path: &str,
     index_for_directory: bool,
-) -> Option<(Vec<u8>, String)> {
+) -> Option<StaticFileRef> {
     let normalized = relative_path.trim().replace('\\', "/");
     if normalized.contains("..") {
         tracing::warn!("Rejected static path traversal attempt: {}", relative_path);
@@ -481,23 +552,22 @@ async fn read_static_file(
         }
     }
 
-    if !static_file.exists() || !static_file.is_file() {
-        return None;
-    }
+    let metadata = match fs::metadata(&static_file).await {
+        Ok(meta) if meta.is_file() => meta,
+        _ => return None,
+    };
 
-    match fs::read(&static_file).await {
-        Ok(bytes) => {
-            let mime_type = mime_guess::from_path(&static_file)
-                .first_or_octet_stream()
-                .essence_str()
-                .to_string();
-            Some((bytes, mime_type))
-        }
-        Err(e) => {
-            tracing::warn!("Failed to read static file {:?}: {}", static_file, e);
-            None
-        }
-    }
+    let size = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+    let mime_type = mime_guess::from_path(&static_file)
+        .first_or_octet_stream()
+        .essence_str()
+        .to_string();
+
+    Some(StaticFileRef {
+        path: static_file,
+        content_type: mime_type,
+        size,
+    })
 }
 
 fn cache_key_aggregate_entry(word: &str) -> String {

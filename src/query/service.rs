@@ -7,7 +7,9 @@ use crate::app_state::AppState;
 
 use super::error::QueryError;
 use super::presenter::{AggregateSection, render_aggregate_html};
-use super::repository::{detect_content_type, extract_link_target, lookup_record_in_file};
+use super::repository::{
+    MAX_RESOURCE_RECORD_BYTES, detect_content_type, extract_link_target, lookup_record_in_file,
+};
 use super::rewrite::rewrite_html;
 use super::specific::query_specific_entry;
 
@@ -167,7 +169,12 @@ fn query_internal(
     };
 
     for file in files {
-        let Some(data) = lookup_record_in_file(state, file, &w)? else {
+        let max_record_length = if is_resource_key(&w) {
+            Some(MAX_RESOURCE_RECORD_BYTES)
+        } else {
+            None
+        };
+        let Some(data) = lookup_record_in_file(state, file, &w, max_record_length)? else {
             continue;
         };
 
@@ -197,7 +204,7 @@ fn query_internal(
 
 fn get_link_target(state: &AppState, word: &str) -> Option<String> {
     for file in state.dict_text_files() {
-        let Ok(Some(data)) = lookup_record_in_file(state, file, word) else {
+        let Ok(Some(data)) = lookup_record_in_file(state, file, word, None) else {
             continue;
         };
         if let Some(linked_word) = extract_link_target(&data) {

@@ -1,6 +1,7 @@
 use crate::app_state::AppState;
 use crate::query::{
-    QueryError, detect_content_type, extract_link_target, lookup_record_in_file, rewrite_html,
+    MAX_RESOURCE_RECORD_BYTES, QueryError, detect_content_type, extract_link_target,
+    lookup_record_in_file, rewrite_html,
 };
 use std::path::Path;
 use tracing::info;
@@ -13,7 +14,8 @@ pub fn query_specific_resource(
     file: &Path,
     key: &str,
 ) -> Result<Option<(Vec<u8>, String)>, QueryError> {
-    let Some(data) = lookup_record_in_file(state, file, key)? else {
+    let Some(data) = lookup_record_in_file(state, file, key, Some(MAX_RESOURCE_RECORD_BYTES))?
+    else {
         return Ok(None);
     };
     Ok(Some((data, detect_content_type(key))))
@@ -41,7 +43,7 @@ fn query_specific_entry_internal(
         return Err(QueryError::TooManyRedirects);
     }
 
-    let Some(mut data) = lookup_record_in_file(state, file, word)? else {
+    let Some(mut data) = lookup_record_in_file(state, file, word, None)? else {
         return Ok(None);
     };
 
