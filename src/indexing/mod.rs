@@ -150,10 +150,19 @@ pub(crate) fn mdx_to_sqlite(file: &Path) -> anyhow::Result<()> {
         };
 
         for r in mdx.entries() {
+            let record_length = r
+                .record_end_in_de_block
+                .checked_sub(r.record_start_in_de_block)
+                .with_context(|| {
+                    format!(
+                        "invalid record range for '{}': {}..{}",
+                        r.text, r.record_start_in_de_block, r.record_end_in_de_block
+                    )
+                })?;
             stmt.execute(params![
                 r.text,
                 r.record_start_in_de_block,
-                r.record_end_in_de_block - r.record_start_in_de_block,
+                record_length,
                 r.block_offset_in_buf,
                 r.block_csize,
                 r.block_dsize

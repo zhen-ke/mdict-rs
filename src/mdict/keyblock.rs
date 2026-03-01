@@ -19,6 +19,9 @@ use ripemd::{Digest, Ripemd128};
 use std::io::Read;
 use tracing::warn;
 
+const MAX_KEY_BLOCK_INFO_DSIZE: usize = 64 * 1024 * 1024;
+const MAX_KEY_BLOCK_DSIZE: usize = 256 * 1024 * 1024;
+
 pub struct KeyBlockHeader {
     #[allow(unused)]
     pub block_num: usize,
@@ -57,18 +60,40 @@ pub fn parse_key_block_header<'a>(
 
     fn parse_key_block_header_v1(data: &[u8]) -> IResult<&[u8], KeyBlockHeader> {
         let (data, info_buf) = take(16_usize)(data)?;
-        // map 接收一个parser和一个匿名fn, 将parser的结果传递给fn后得到返回值
-        let (_, kbh) = map(
-            (be_u32, be_u32, be_u32, be_u32),
-            |(block_num, entry_num, info_len, blocks_len)| KeyBlockHeader {
-                block_num: block_num as usize,
-                entry_num: entry_num as usize,
-                key_block_info_decompressed_len: info_len as usize, // 没有压缩则相等
-                key_block_info_len: info_len as usize,
-                key_blocks_len: blocks_len as usize,
-            },
-        )
-        .parse(info_buf)?;
+        let (_, (block_num, entry_num, info_len, blocks_len)) =
+            (be_u32, be_u32, be_u32, be_u32).parse(info_buf)?;
+        let kbh = KeyBlockHeader {
+            block_num: usize::try_from(block_num).map_err(|_| {
+                nom::Err::Failure(nom::error::Error::new(
+                    info_buf,
+                    nom::error::ErrorKind::Verify,
+                ))
+            })?,
+            entry_num: usize::try_from(entry_num).map_err(|_| {
+                nom::Err::Failure(nom::error::Error::new(
+                    info_buf,
+                    nom::error::ErrorKind::Verify,
+                ))
+            })?,
+            key_block_info_decompressed_len: usize::try_from(info_len).map_err(|_| {
+                nom::Err::Failure(nom::error::Error::new(
+                    info_buf,
+                    nom::error::ErrorKind::Verify,
+                ))
+            })?,
+            key_block_info_len: usize::try_from(info_len).map_err(|_| {
+                nom::Err::Failure(nom::error::Error::new(
+                    info_buf,
+                    nom::error::ErrorKind::Verify,
+                ))
+            })?,
+            key_blocks_len: usize::try_from(blocks_len).map_err(|_| {
+                nom::Err::Failure(nom::error::Error::new(
+                    info_buf,
+                    nom::error::ErrorKind::Verify,
+                ))
+            })?,
+        };
         Ok((data, kbh))
     }
 
@@ -90,23 +115,49 @@ pub fn parse_key_block_header<'a>(
                 nom::error::ErrorKind::Verify,
             )));
         }
-        let (_, kbh) = map(
-            (be_u64, be_u64, be_u64, be_u64, be_u64),
-            |(
+        let (
+            _,
+            (
                 block_num,
                 entry_num,
                 key_block_info_decompressed_len,
                 key_block_info_len,
                 key_blocks_len,
-            )| KeyBlockHeader {
-                block_num: block_num as usize,
-                entry_num: entry_num as usize,
-                key_block_info_decompressed_len: key_block_info_decompressed_len as usize,
-                key_block_info_len: key_block_info_len as usize,
-                key_blocks_len: key_blocks_len as usize,
-            },
-        )
-        .parse(info_buf)?;
+            ),
+        ) = (be_u64, be_u64, be_u64, be_u64, be_u64).parse(info_buf)?;
+        let kbh = KeyBlockHeader {
+            block_num: usize::try_from(block_num).map_err(|_| {
+                nom::Err::Failure(nom::error::Error::new(
+                    info_buf,
+                    nom::error::ErrorKind::Verify,
+                ))
+            })?,
+            entry_num: usize::try_from(entry_num).map_err(|_| {
+                nom::Err::Failure(nom::error::Error::new(
+                    info_buf,
+                    nom::error::ErrorKind::Verify,
+                ))
+            })?,
+            key_block_info_decompressed_len: usize::try_from(key_block_info_decompressed_len)
+                .map_err(|_| {
+                    nom::Err::Failure(nom::error::Error::new(
+                        info_buf,
+                        nom::error::ErrorKind::Verify,
+                    ))
+                })?,
+            key_block_info_len: usize::try_from(key_block_info_len).map_err(|_| {
+                nom::Err::Failure(nom::error::Error::new(
+                    info_buf,
+                    nom::error::ErrorKind::Verify,
+                ))
+            })?,
+            key_blocks_len: usize::try_from(key_blocks_len).map_err(|_| {
+                nom::Err::Failure(nom::error::Error::new(
+                    info_buf,
+                    nom::error::ErrorKind::Verify,
+                ))
+            })?,
+        };
         Ok((data, kbh))
     }
 }
@@ -115,11 +166,18 @@ pub fn parse_key_block_header<'a>(
 pub fn parse_key_block_info<'a>(
     data: &'a [u8],
     block_info_len: usize,
+    block_info_decompressed_len: usize,
     header: &Header,
 ) -> IResult<&'a [u8], Vec<KeyBlockSize>> {
     return match &header.version {
         Version::V1 => v1(data, block_info_len),
-        Version::V2 => v2(data, block_info_len, &header.encrypted, &header.encoding),
+        Version::V2 => v2(
+            data,
+            block_info_len,
+            block_info_decompressed_len,
+            &header.encrypted,
+            &header.encoding,
+        ),
     };
 
     fn v1(data: &[u8], block_info_len: usize) -> IResult<&[u8], Vec<KeyBlockSize>> {
@@ -131,6 +189,7 @@ pub fn parse_key_block_info<'a>(
     fn v2<'a>(
         data: &'a [u8],
         block_info_len: usize,
+        block_info_decompressed_len: usize,
         encrypted: &str,
         encoding: &str,
     ) -> IResult<&'a [u8], Vec<KeyBlockSize>> {
@@ -147,46 +206,37 @@ pub fn parse_key_block_info<'a>(
                 nom::error::ErrorKind::Verify,
             )));
         }
-
-        let mut key_block_info = vec![];
-
-        // encrypted 可能是 "0", "No", "" 等表示未加密
-        if encrypted == "0" || encrypted.eq_ignore_ascii_case("no") || encrypted.is_empty() {
-            ZlibDecoder::new(&block_info[8..])
-                .read_to_end(&mut key_block_info)
-                .map_err(|_| {
-                    nom::Err::Failure(nom::error::Error::new(
-                        block_info,
-                        nom::error::ErrorKind::Fail,
-                    ))
-                })?;
-        }
-        // decrypt: encrypted 为 "2" 或 "3" 表示加密
-        else if encrypted == "2" || encrypted == "3" {
-            let mut md = Ripemd128::new();
-            let mut v = Vec::from(&block_info[4..8]);
-            let value: u32 = 0x3695;
-            v.extend_from_slice(&value.to_le_bytes());
-            md.update(v);
-            let key = md.finalize();
-            let mut d = Vec::from(&block_info[0..8]);
-            let decrypted = fast_decrypt(&block_info[8..], key.as_slice());
-            d.extend(decrypted);
-            ZlibDecoder::new(&d[8..])
-                .read_to_end(&mut key_block_info)
-                .map_err(|_| {
-                    nom::Err::Failure(nom::error::Error::new(
-                        block_info,
-                        nom::error::ErrorKind::Fail,
-                    ))
-                })?;
-        } else {
-            // Unknown encryption flag
+        if block_info_decompressed_len > MAX_KEY_BLOCK_INFO_DSIZE {
             return Err(nom::Err::Failure(nom::error::Error::new(
                 block_info,
                 nom::error::ErrorKind::Verify,
             )));
         }
+
+        // encrypted 可能是 "0", "No", "" 等表示未加密
+        let key_block_info =
+            if encrypted == "0" || encrypted.eq_ignore_ascii_case("no") || encrypted.is_empty() {
+                zlib_decompress_checked(&block_info[8..], block_info_decompressed_len, block_info)?
+            }
+            // decrypt: encrypted 为 "2" 或 "3" 表示加密
+            else if encrypted == "2" || encrypted == "3" {
+                let mut md = Ripemd128::new();
+                let mut v = Vec::from(&block_info[4..8]);
+                let value: u32 = 0x3695;
+                v.extend_from_slice(&value.to_le_bytes());
+                md.update(v);
+                let key = md.finalize();
+                let mut d = Vec::from(&block_info[0..8]);
+                let decrypted = fast_decrypt(&block_info[8..], key.as_slice());
+                d.extend(decrypted);
+                zlib_decompress_checked(&d[8..], block_info_decompressed_len, block_info)?
+            } else {
+                // Unknown encryption flag
+                return Err(nom::Err::Failure(nom::error::Error::new(
+                    block_info,
+                    nom::error::ErrorKind::Verify,
+                )));
+            };
 
         // MDD 文件的 encoding 为空字符串，使用 UTF-16LE 编码
         // 对于 UTF-16，text length 字段是字符数，需要 * 2 得到字节数
@@ -506,6 +556,12 @@ fn key_block_parser<'a>(input: &'a [u8], csize: usize, dsize: usize) -> IResult<
             nom::error::ErrorKind::LengthValue,
         )));
     }
+    if dsize > MAX_KEY_BLOCK_DSIZE {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
 
     if input.len() < csize {
         return Err(nom::Err::Incomplete(nom::Needed::new(csize - input.len())));
@@ -550,15 +606,7 @@ fn key_block_parser<'a>(input: &'a [u8], csize: usize, dsize: usize) -> IResult<
                 nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
             })?
         }
-        2 => {
-            let mut v = Vec::with_capacity(dsize);
-            ZlibDecoder::new(&data[..])
-                .read_to_end(&mut v)
-                .map_err(|_| {
-                    nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
-                })?;
-            v
-        }
+        2 => zlib_decompress_checked(&data[..], dsize, input)?,
         _ => {
             return Err(nom::Err::Failure(nom::error::Error::new(
                 input,
@@ -566,6 +614,41 @@ fn key_block_parser<'a>(input: &'a [u8], csize: usize, dsize: usize) -> IResult<
             )));
         }
     };
+    if decompressed.len() != dsize {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
 
     Ok((remain, decompressed))
+}
+
+fn zlib_decompress_checked<'a>(
+    compressed: &[u8],
+    expected_size: usize,
+    input: &'a [u8],
+) -> Result<Vec<u8>, nom::Err<nom::error::Error<&'a [u8]>>> {
+    let limit = u64::try_from(expected_size)
+        .ok()
+        .and_then(|v| v.checked_add(1))
+        .unwrap_or(u64::MAX);
+    let mut out = Vec::new();
+    let mut decoder = ZlibDecoder::new(compressed).take(limit);
+    decoder.read_to_end(&mut out).map_err(|_| {
+        nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
+    })?;
+    if out.len() > expected_size {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    if out.len() != expected_size {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    Ok(out)
 }

@@ -3,8 +3,8 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Mutex;
 
-use axum::body::Bytes;
 use crate::mdict::recordblock::record_block_parser;
+use axum::body::Bytes;
 use lru::LruCache;
 use memmap2::MmapOptions;
 use nom::Parser;
@@ -42,7 +42,14 @@ impl MdxReader {
         record_offset: usize,
         record_length: usize,
     ) -> anyhow::Result<Bytes> {
-        if block_offset + block_csize > self.mmap.len() {
+        let block_end = block_offset.checked_add(block_csize).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Block end overflow: offset {} + size {}",
+                block_offset,
+                block_csize
+            )
+        })?;
+        if block_end > self.mmap.len() {
             return Err(anyhow::anyhow!(
                 "Block out of bounds: offset {} + size {} > file size {}",
                 block_offset,
@@ -65,7 +72,7 @@ impl MdxReader {
         {
             cached
         } else {
-            let block_buf = &self.mmap[block_offset..block_offset + block_csize];
+            let block_buf = &self.mmap[block_offset..block_end];
             let (_, decompressed) = record_block_parser(block_csize, block_dsize)
                 .parse(block_buf)
                 .map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
@@ -78,7 +85,14 @@ impl MdxReader {
         };
 
         // 边界检查
-        if record_offset + record_length > block_decompressed.len() {
+        let record_end = record_offset.checked_add(record_length).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Record end overflow: offset {} + length {}",
+                record_offset,
+                record_length
+            )
+        })?;
+        if record_end > block_decompressed.len() {
             return Err(anyhow::anyhow!(
                 "Record out of bounds: offset {} + length {} > block size {}",
                 record_offset,
@@ -87,6 +101,6 @@ impl MdxReader {
             ));
         }
 
-        Ok(block_decompressed.slice(record_offset..record_offset + record_length))
+        Ok(block_decompressed.slice(record_offset..record_end))
     }
 }
