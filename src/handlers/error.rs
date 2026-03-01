@@ -11,6 +11,8 @@ pub enum AppError {
     NotFound,
     /// Missing required parameter
     BadRequest(String),
+    /// Service is temporarily overloaded
+    Overloaded,
     /// Internal server error
     Internal(String),
 }
@@ -20,6 +22,7 @@ impl std::fmt::Display for AppError {
         match self {
             AppError::NotFound => write!(f, "Not found"),
             AppError::BadRequest(msg) => write!(f, "Bad request: {}", msg),
+            AppError::Overloaded => write!(f, "Service temporarily overloaded"),
             AppError::Internal(msg) => write!(f, "Internal error: {}", msg),
         }
     }
@@ -30,6 +33,10 @@ impl IntoResponse for AppError {
         let (status, message) = match &self {
             AppError::NotFound => (StatusCode::NOT_FOUND, "Not found".to_string()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            AppError::Overloaded => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Service temporarily overloaded, please retry.".to_string(),
+            ),
             AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
         };
 

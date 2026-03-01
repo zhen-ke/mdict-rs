@@ -10,6 +10,7 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use ripemd::{Digest, Ripemd160};
 use rusqlite::OpenFlags;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::config::{DictConfig, DictInfo};
 use crate::mdict::reader::MdxReader;
@@ -17,6 +18,7 @@ use crate::mdict::reader::MdxReader;
 const ENTRY_CACHE_SIZE: usize = 256;
 const RESOURCE_CACHE_SIZE: usize = 1024;
 const NEGATIVE_CACHE_SIZE: usize = 1024;
+const DEFAULT_MAX_CONCURRENT_BLOCKING_QUERIES: usize = 64;
 const ENTRY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const RESOURCE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(20);
@@ -46,6 +48,7 @@ pub struct AppState {
 
     db_pools: Arc<RwLock<HashMap<PathBuf, Pool<SqliteConnectionManager>>>>,
     mdx_readers: Arc<RwLock<HashMap<PathBuf, Arc<MdxReader>>>>,
+    blocking_query_slots: Arc<Semaphore>,
     entry_cache: Arc<Mutex<LruCache<String, CachedPayload>>>,
     resource_cache: Arc<Mutex<LruCache<String, CachedPayload>>>,
     negative_cache: Arc<Mutex<LruCache<String, Instant>>>,
@@ -53,6 +56,13 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(dict_dir: PathBuf, static_dir: PathBuf, dict_files: Vec<PathBuf>) -> Self {
+        let max_concurrent_blocking_queries =
+            std::env::var("MDICT_MAX_CONCURRENT_BLOCKING_QUERIES")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(DEFAULT_MAX_CONCURRENT_BLOCKING_QUERIES);
+
         let dict_text_files: Vec<PathBuf> = dict_files
             .iter()
             .filter(|p| Self::is_mdx_file(p))
@@ -126,6 +136,7 @@ impl AppState {
             path_to_id: Arc::new(path_to_id),
             db_pools: Arc::new(RwLock::new(HashMap::new())),
             mdx_readers: Arc::new(RwLock::new(HashMap::new())),
+            blocking_query_slots: Arc::new(Semaphore::new(max_concurrent_blocking_queries)),
             entry_cache: Arc::new(Mutex::new(LruCache::new(
                 NonZeroUsize::new(ENTRY_CACHE_SIZE).expect("ENTRY_CACHE_SIZE > 0"),
             ))),
@@ -379,6 +390,10 @@ impl AppState {
             .lock()
             .expect("negative_cache mutex poisoned")
             .pop(key);
+    }
+
+    pub fn try_acquire_query_slot(&self) -> Option<OwnedSemaphorePermit> {
+        self.blocking_query_slots.clone().try_acquire_owned().ok()
     }
 
     fn is_mdx_file(path: &Path) -> bool {

@@ -46,6 +46,16 @@ pub fn not_found() -> Response {
         .unwrap()
 }
 
+/// Build a 503 Service Unavailable response for temporary overload.
+pub fn service_unavailable() -> Response {
+    axum::http::Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .header("Content-Type", "text/plain; charset=utf-8")
+        .header("Retry-After", "1")
+        .body("Service temporarily overloaded, please retry.".into())
+        .unwrap()
+}
+
 /// Build a cacheable binary response with optional ETag revalidation and byte-range support.
 pub fn cacheable_binary_response(
     data: impl Into<Bytes>,

@@ -4,7 +4,7 @@ mod response;
 pub use error::AppError;
 use response::{
     cacheable_binary_response, css_response, js_response, not_found, ok_response,
-    stream_file_response,
+    service_unavailable, stream_file_response,
 };
 
 use crate::app_state::AppState;
@@ -15,7 +15,6 @@ use crate::query::{
     query_with_trace, suggest,
 };
 use serde_derive::Deserialize;
-use std::collections::HashSet;
 use std::path::{Path as FsPath, PathBuf};
 
 use axum::{
@@ -56,6 +55,7 @@ pub(crate) async fn handle_query(
         return Err(AppError::NotFound);
     }
 
+    let _query_slot = state.try_acquire_query_slot().ok_or(AppError::Overloaded)?;
     let query_state = state.clone();
     let query_word = word.clone();
     let result = tokio::task::spawn_blocking(move || query_aggregate(&query_state, query_word))
@@ -91,6 +91,7 @@ pub(crate) async fn handle_lucky(State(state): State<AppState>) -> Result<Respon
         return Err(AppError::NotFound);
     }
 
+    let _query_slot = state.try_acquire_query_slot().ok_or(AppError::Overloaded)?;
     let query_state = state.clone();
     let query_word = word.clone();
     let result = tokio::task::spawn_blocking(move || query_aggregate(&query_state, query_word))
@@ -116,19 +117,20 @@ pub(crate) async fn handle_lucky(State(state): State<AppState>) -> Result<Respon
 pub(crate) async fn handle_suggest(
     State(state): State<AppState>,
     Query(params): Query<SuggestQuery>,
-) -> Json<Vec<String>> {
+) -> Result<Json<Vec<String>>, AppError> {
     let q = params.q;
+    let _query_slot = state.try_acquire_query_slot().ok_or(AppError::Overloaded)?;
     let state = state.clone();
     let result = tokio::task::spawn_blocking(move || suggest(&state, q, 10)).await;
     match result {
-        Ok(Ok(suggestions)) => Json(suggestions),
+        Ok(Ok(suggestions)) => Ok(Json(suggestions)),
         Ok(Err(e)) => {
             tracing::warn!("Suggest failed: {}", e);
-            Json(vec![])
+            Ok(Json(vec![]))
         }
         Err(e) => {
             tracing::warn!("Suggest task failed: {}", e);
-            Json(vec![])
+            Ok(Json(vec![]))
         }
     }
 }
@@ -138,22 +140,23 @@ pub(crate) async fn handle_suggest(
 pub(crate) async fn handle_trace(
     State(state): State<AppState>,
     Query(params): Query<SuggestQuery>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, AppError> {
     let q = params.q;
+    let _query_slot = state.try_acquire_query_slot().ok_or(AppError::Overloaded)?;
     let state = state.clone();
     let result = tokio::task::spawn_blocking(move || query_with_trace(&state, q)).await;
     match result {
-        Ok(Ok((chain, final_word))) => Json(serde_json::json!({
+        Ok(Ok((chain, final_word))) => Ok(Json(serde_json::json!({
             "chain": chain,
             "depth": chain.len() - 1,
             "final_word": final_word,
-        })),
-        Ok(Err(e)) => Json(serde_json::json!({
+        }))),
+        Ok(Err(e)) => Ok(Json(serde_json::json!({
             "error": e.to_string(),
-        })),
-        Err(e) => Json(serde_json::json!({
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({
             "error": format!("trace task failed: {}", e),
-        })),
+        }))),
     }
 }
 
@@ -220,6 +223,9 @@ pub(crate) async fn handle_resource(
         return not_found();
     }
 
+    let Some(_query_slot) = state.try_acquire_query_slot() else {
+        return service_unavailable();
+    };
     let query_state = state.clone();
     let result = tokio::task::spawn_blocking(move || {
         for candidate in &candidates {
@@ -277,6 +283,9 @@ pub(crate) async fn handle_dict_entry(
         return not_found();
     }
 
+    let Some(_query_slot) = state.try_acquire_query_slot() else {
+        return service_unavailable();
+    };
     let state_cloned = state.clone();
     let dict_id_for_query = dict_id.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -368,6 +377,9 @@ async fn query_dict_resource(
     let candidates = build_resource_candidates(&path);
 
     if !files.is_empty() && !candidates.is_empty() {
+        let Some(_query_slot) = state.try_acquire_query_slot() else {
+            return service_unavailable();
+        };
         let query_state = state.clone();
         let result = tokio::task::spawn_blocking(move || {
             for file in files {
@@ -454,29 +466,23 @@ fn build_resource_candidates(path: &str) -> Vec<String> {
         return Vec::new();
     }
 
-    let slash_form = normalized.clone();
-    let backslash_form = normalized.replace('/', "\\");
+    let mut candidates = Vec::with_capacity(4);
+    push_unique_candidate(&mut candidates, normalized.clone());
+    push_prefixed_candidate(&mut candidates, '/', &normalized);
 
-    let mut seen = HashSet::new();
-    let mut candidates = Vec::new();
-    for candidate in [
-        slash_form.clone(),
-        format!("/{}", slash_form),
-        backslash_form.clone(),
-        format!("\\{}", backslash_form),
-    ] {
-        if candidate.is_empty() || !seen.insert(candidate.clone()) {
-            continue;
-        }
-        candidates.push(candidate);
-    }
+    let backslash_form = if normalized.contains('/') {
+        normalized.replace('/', "\\")
+    } else {
+        normalized.clone()
+    };
+    push_unique_candidate(&mut candidates, backslash_form.clone());
+    push_prefixed_candidate(&mut candidates, '\\', &backslash_form);
 
     candidates
 }
 
 fn build_entry_candidates(word: &str) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut candidates = Vec::new();
+    let mut candidates = Vec::with_capacity(2);
 
     let raw = word.trim();
     let trimmed = raw
@@ -485,16 +491,28 @@ fn build_entry_candidates(word: &str) -> Vec<String> {
         .trim_end_matches('/')
         .trim_end_matches('\\');
 
-    for candidate in [raw, trimmed] {
-        if candidate.is_empty() {
-            continue;
-        }
-        if seen.insert(candidate.to_string()) {
-            candidates.push(candidate.to_string());
-        }
+    if !raw.is_empty() {
+        candidates.push(raw.to_string());
+    }
+    if !trimmed.is_empty() && trimmed != raw {
+        candidates.push(trimmed.to_string());
     }
 
     candidates
+}
+
+fn push_unique_candidate(candidates: &mut Vec<String>, candidate: String) {
+    if candidate.is_empty() || candidates.iter().any(|existing| existing == &candidate) {
+        return;
+    }
+    candidates.push(candidate);
+}
+
+fn push_prefixed_candidate(candidates: &mut Vec<String>, prefix: char, value: &str) {
+    let mut candidate = String::with_capacity(value.len() + 1);
+    candidate.push(prefix);
+    candidate.push_str(value);
+    push_unique_candidate(candidates, candidate);
 }
 
 struct StaticFileRef {
@@ -571,31 +589,53 @@ async fn resolve_static_file(
 }
 
 fn cache_key_aggregate_entry(word: &str) -> String {
-    format!("entry:aggregate:{}", word.trim().to_lowercase())
+    let mut key = String::with_capacity("entry:aggregate:".len() + word.len());
+    key.push_str("entry:aggregate:");
+    push_trimmed_lowercase(&mut key, word);
+    key
 }
 
 fn cache_key_dict_entry(dict_id: &str, word: &str) -> String {
-    format!(
-        "entry:dict:{}:{}",
-        dict_id.trim().to_lowercase(),
-        word.trim().to_lowercase()
-    )
+    let mut key = String::with_capacity("entry:dict:".len() + dict_id.len() + word.len() + 1);
+    key.push_str("entry:dict:");
+    push_trimmed_lowercase(&mut key, dict_id);
+    key.push(':');
+    push_trimmed_lowercase(&mut key, word);
+    key
 }
 
 fn cache_key_global_resource(path: &str) -> String {
-    format!("resource:global:{}", path.trim())
+    let trimmed = path.trim();
+    let mut key = String::with_capacity("resource:global:".len() + trimmed.len());
+    key.push_str("resource:global:");
+    key.push_str(trimmed);
+    key
 }
 
 fn cache_key_dict_resource(dict_id: &str, path: &str) -> String {
-    format!(
-        "resource:dict:{}:{}",
-        dict_id.trim().to_lowercase(),
-        path.trim()
-    )
+    let trimmed_path = path.trim();
+    let mut key =
+        String::with_capacity("resource:dict:".len() + dict_id.len() + trimmed_path.len() + 1);
+    key.push_str("resource:dict:");
+    push_trimmed_lowercase(&mut key, dict_id);
+    key.push(':');
+    key.push_str(trimmed_path);
+    key
 }
 
 fn negative_key(cache_key: &str) -> String {
-    format!("negative:{}", cache_key)
+    let mut key = String::with_capacity("negative:".len() + cache_key.len());
+    key.push_str("negative:");
+    key.push_str(cache_key);
+    key
+}
+
+fn push_trimmed_lowercase(buf: &mut String, value: &str) {
+    for ch in value.trim().chars() {
+        for lowered in ch.to_lowercase() {
+            buf.push(lowered);
+        }
+    }
 }
 
 // ============ Dictionary Config API ============
