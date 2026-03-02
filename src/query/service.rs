@@ -6,6 +6,7 @@ use tracing::{debug, info, warn};
 
 use crate::app_state::AppState;
 
+use super::entry_query_candidates;
 use super::error::QueryError;
 use super::presenter::{AggregateSection, render_aggregate_html};
 use super::repository::{
@@ -168,53 +169,67 @@ fn query_internal(
     } else {
         state.dict_text_files()
     };
+    let candidates = if is_resource_key(&w) {
+        vec![w.clone()]
+    } else {
+        entry_query_candidates(&w)
+    };
 
     for file in files {
-        let max_record_length = if is_resource_key(&w) {
-            Some(MAX_RESOURCE_RECORD_BYTES)
-        } else {
-            None
-        };
-        let Some(data) = lookup_record_in_file(state, file, &w, max_record_length)? else {
-            continue;
-        };
+        for candidate in &candidates {
+            let max_record_length = if is_resource_key(candidate) {
+                Some(MAX_RESOURCE_RECORD_BYTES)
+            } else {
+                None
+            };
+            let Some(data) = lookup_record_in_file(state, file, candidate, max_record_length)?
+            else {
+                continue;
+            };
 
-        if !is_resource_key(&w) {
-            if let Some(linked_word) = extract_link_target(&data) {
-                info!("following @@@LINK redirect: {} -> {}", w, linked_word);
-                return query_internal(state, linked_word, depth + 1);
+            if !is_resource_key(candidate) {
+                if let Some(linked_word) = extract_link_target(&data) {
+                    info!(
+                        "following @@@LINK redirect: {} (candidate {}) -> {}",
+                        w, candidate, linked_word
+                    );
+                    return query_internal(state, linked_word, depth + 1);
+                }
             }
+
+            let mut final_data = data;
+            let content_type = if is_resource_key(candidate) {
+                detect_content_type(candidate)
+            } else {
+                if let Some(dict_id) = state.get_dict_id(file) {
+                    let rewritten = match std::str::from_utf8(&final_data) {
+                        Ok(text) => rewrite_html(text, &dict_id),
+                        Err(_) => {
+                            let text = String::from_utf8_lossy(&final_data);
+                            rewrite_html(text.as_ref(), &dict_id)
+                        }
+                    };
+                    final_data = Bytes::from(rewritten);
+                }
+                "text/html".to_string()
+            };
+
+            return Ok((final_data, content_type));
         }
-
-        let mut final_data = data;
-        let content_type = if is_resource_key(&w) {
-            detect_content_type(&w)
-        } else {
-            if let Some(dict_id) = state.get_dict_id(file) {
-                let rewritten = match std::str::from_utf8(&final_data) {
-                    Ok(text) => rewrite_html(text, &dict_id),
-                    Err(_) => {
-                        let text = String::from_utf8_lossy(&final_data);
-                        rewrite_html(text.as_ref(), &dict_id)
-                    }
-                };
-                final_data = Bytes::from(rewritten);
-            }
-            "text/html".to_string()
-        };
-
-        return Ok((final_data, content_type));
     }
     Err(QueryError::NotFound)
 }
 
 fn get_link_target(state: &AppState, word: &str) -> Option<String> {
+    let candidates = entry_query_candidates(word);
     for file in state.dict_text_files() {
-        let Ok(Some(data)) = lookup_record_in_file(state, file, word, None) else {
-            continue;
-        };
-        if let Some(linked_word) = extract_link_target(&data) {
-            return Some(linked_word);
+        for candidate in &candidates {
+            let Ok(Some(data)) = lookup_record_in_file(state, file, candidate, None) else {
+                continue;
+            };
+            if let Some(linked_word) = extract_link_target(&data) {
+                return Some(linked_word);
+            }
         }
     }
     None

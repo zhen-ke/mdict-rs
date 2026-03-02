@@ -1,7 +1,7 @@
 use crate::app_state::AppState;
 use crate::query::{
-    MAX_RESOURCE_RECORD_BYTES, QueryError, detect_content_type, extract_link_target,
-    lookup_record_in_file, rewrite_html,
+    MAX_RESOURCE_RECORD_BYTES, QueryError, detect_content_type, entry_query_candidates,
+    extract_link_target, lookup_record_in_file, rewrite_html,
 };
 use axum::body::Bytes;
 use std::path::Path;
@@ -44,26 +44,35 @@ fn query_specific_entry_internal(
         return Err(QueryError::TooManyRedirects);
     }
 
-    let Some(mut data) = lookup_record_in_file(state, file, word, None)? else {
+    let candidates = entry_query_candidates(word);
+    if candidates.is_empty() {
         return Ok(None);
-    };
-
-    if let Some(linked_word) = extract_link_target(&data) {
-        info!(
-            "following dict-specific @@@LINK redirect: {} -> {}",
-            word, linked_word
-        );
-        return query_specific_entry_internal(state, file, &linked_word, dict_id, depth + 1);
     }
 
-    let rewritten = match std::str::from_utf8(&data) {
-        Ok(text) => rewrite_html(text, dict_id),
-        Err(_) => {
-            let text = String::from_utf8_lossy(&data);
-            rewrite_html(text.as_ref(), dict_id)
-        }
-    };
-    data = Bytes::from(rewritten);
+    for candidate in candidates {
+        let Some(mut data) = lookup_record_in_file(state, file, &candidate, None)? else {
+            continue;
+        };
 
-    Ok(Some((data, "text/html".to_string())))
+        if let Some(linked_word) = extract_link_target(&data) {
+            info!(
+                "following dict-specific @@@LINK redirect: {} (candidate {}) -> {}",
+                word, candidate, linked_word
+            );
+            return query_specific_entry_internal(state, file, &linked_word, dict_id, depth + 1);
+        }
+
+        let rewritten = match std::str::from_utf8(&data) {
+            Ok(text) => rewrite_html(text, dict_id),
+            Err(_) => {
+                let text = String::from_utf8_lossy(&data);
+                rewrite_html(text.as_ref(), dict_id)
+            }
+        };
+        data = Bytes::from(rewritten);
+
+        return Ok(Some((data, "text/html".to_string())));
+    }
+
+    Ok(None)
 }

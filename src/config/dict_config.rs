@@ -30,6 +30,9 @@ pub struct DictConfig {
 
     /// CSS container class for style scoping
     pub container_class: Option<String>,
+
+    /// Whether FTS should be built for this dictionary (default: true)
+    pub fts: Option<bool>,
 }
 
 impl DictConfig {
@@ -114,6 +117,10 @@ impl DictConfig {
                 .to_string()
         }
     }
+
+    pub fn is_fts_enabled(&self) -> bool {
+        self.fts.unwrap_or(true)
+    }
 }
 
 /// Dictionary info for API response
@@ -136,6 +143,9 @@ pub struct DictInfo {
 
     /// Whether this dict has custom JS
     pub has_js: bool,
+
+    /// Whether FTS is enabled for this dictionary
+    pub fts_enabled: bool,
 }
 
 #[cfg(test)]
@@ -147,6 +157,7 @@ mod tests {
         let config = DictConfig::default();
         assert!(config.name.is_none());
         assert!(config.css.is_none());
+        assert!(config.is_fts_enabled());
     }
 
     #[test]

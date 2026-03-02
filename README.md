@@ -8,6 +8,7 @@ It's at an early stage of development. The parser focuses on MDX V2-compatible d
 
 1. Put your `.mdx` / `.mdd` files into the `mdict/` folder (default), or set `MDX_DICT_DIR` to a directory containing them.
 2. (Optional) Add a per-dictionary config TOML next to the `.mdx` file, e.g. `mdict/foo.toml` for `mdict/foo.mdx`.
+   - Set `fts = false` in TOML to skip building FTS for that dictionary.
 3. Run with:
 
 ```bash
@@ -32,6 +33,7 @@ To keep entry links, images and audio separated, the server now exposes:
 1. `GET /dict/{id}/entry/{word}` for dictionary entry jumps
 2. `GET /dict/{id}/res/{path}` for static resources in dictionary packages
 3. `GET /dict/{id}/audio/{path}` for audio resources
+4. `GET /api/index/status` for index/FTS health per dictionary
 
 Legacy `GET /resource/{id}/{path}` still works for backward compatibility.
 

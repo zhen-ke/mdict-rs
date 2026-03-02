@@ -6,6 +6,7 @@ use anyhow::Context;
 use memmap2::MmapOptions;
 use rusqlite::{Connection, params};
 
+use crate::config::DictConfig;
 use crate::mdict::mdx::Mdx;
 use tracing::{info, warn};
 
@@ -14,6 +15,13 @@ const META_TABLE: &str = "MDX_META";
 const META_SCHEMA_VERSION: &str = "schema_version";
 const META_SOURCE_SIZE: &str = "source_size";
 const META_SOURCE_MTIME: &str = "source_mtime";
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct IndexStatus {
+    pub db_exists: bool,
+    pub up_to_date: bool,
+    pub has_fts: bool,
+}
 
 pub(crate) fn db_path(dict_file: &Path) -> PathBuf {
     PathBuf::from(format!("{}.db", dict_file.to_string_lossy()))
@@ -74,6 +82,26 @@ pub(crate) fn ensure_index(file: &Path, reindex: bool) -> anyhow::Result<()> {
     mdx_to_sqlite(file)
 }
 
+pub(crate) fn index_status(file: &Path) -> anyhow::Result<IndexStatus> {
+    let db_file = db_path(file);
+    if !db_file.exists() {
+        return Ok(IndexStatus {
+            db_exists: false,
+            up_to_date: false,
+            has_fts: false,
+        });
+    }
+
+    let up_to_date = index_up_to_date(file, &db_file).unwrap_or(false);
+    let conn = Connection::open(&db_file)?;
+    let has_fts = has_table(&conn, "MDX_FTS")?;
+    Ok(IndexStatus {
+        db_exists: true,
+        up_to_date,
+        has_fts,
+    })
+}
+
 /// mdx entries and definition to sqlite table
 pub(crate) fn mdx_to_sqlite(file: &Path) -> anyhow::Result<()> {
     let db_file = db_path(file);
@@ -121,7 +149,14 @@ pub(crate) fn mdx_to_sqlite(file: &Path) -> anyhow::Result<()> {
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("mdd"));
     let mut fts_enabled = false;
-    if is_text_dict {
+    let fts_allowed = if is_text_dict {
+        DictConfig::load(file)
+            .map(|cfg| cfg.is_fts_enabled())
+            .unwrap_or(true)
+    } else {
+        false
+    };
+    if is_text_dict && fts_allowed {
         match conn.execute(
             "create virtual table if not exists MDX_FTS using fts5(text, tokenize='unicode61 remove_diacritics 2')",
             params![],
@@ -136,6 +171,8 @@ pub(crate) fn mdx_to_sqlite(file: &Path) -> anyhow::Result<()> {
                 );
             }
         }
+    } else if is_text_dict {
+        info!("FTS disabled by config for {:?}", file);
     }
 
     let tx = conn
@@ -194,21 +231,11 @@ pub(crate) fn mdx_to_sqlite(file: &Path) -> anyhow::Result<()> {
 fn index_up_to_date(file: &Path, db_file: &Path) -> anyhow::Result<bool> {
     let conn = Connection::open(db_file)?;
 
-    let has_index_table: i64 = conn.query_row(
-        "select count(*) from sqlite_master where type='table' and name='MDX_INDEX'",
-        [],
-        |row| row.get(0),
-    )?;
-    if has_index_table == 0 {
+    if !has_table(&conn, "MDX_INDEX")? {
         return Ok(false);
     }
 
-    let has_meta_table: i64 = conn.query_row(
-        "select count(*) from sqlite_master where type='table' and name=?1",
-        params![META_TABLE],
-        |row| row.get(0),
-    )?;
-    if has_meta_table == 0 {
+    if !has_table(&conn, META_TABLE)? {
         return Ok(false);
     }
 
@@ -259,6 +286,15 @@ fn read_meta_value(conn: &Connection, key: &str) -> anyhow::Result<Option<String
     } else {
         Ok(None)
     }
+}
+
+fn has_table(conn: &Connection, table: &str) -> anyhow::Result<bool> {
+    let count: i64 = conn.query_row(
+        "select count(*) from sqlite_master where type='table' and name=?1",
+        params![table],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 fn source_signature(file: &Path) -> anyhow::Result<(u64, u64)> {

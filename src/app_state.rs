@@ -238,6 +238,7 @@ impl AppState {
                     container_class: cfg.container_class.clone(),
                     has_css: cfg.css.is_some(),
                     has_js: cfg.js.is_some(),
+                    fts_enabled: cfg.is_fts_enabled(),
                 })
             })
             .collect()

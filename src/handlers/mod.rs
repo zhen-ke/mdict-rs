@@ -9,12 +9,13 @@ use response::{
 
 use crate::app_state::AppState;
 use crate::config::DictInfo;
+use crate::indexing::index_status;
 use crate::lucky;
 use crate::query::{
     QueryError, query, query_aggregate, query_specific_entry, query_specific_resource,
     query_with_trace, suggest,
 };
-use serde_derive::Deserialize;
+use serde_derive::{Deserialize, Serialize};
 use std::path::{Path as FsPath, PathBuf};
 
 use axum::{
@@ -266,8 +267,8 @@ pub(crate) async fn handle_dict_entry(
         return not_found();
     }
 
-    let candidates = build_entry_candidates(&word);
-    if candidates.is_empty() {
+    let word = word.trim().to_string();
+    if word.is_empty() {
         return not_found();
     }
 
@@ -285,14 +286,13 @@ pub(crate) async fn handle_dict_entry(
     };
     let state_cloned = state.clone();
     let dict_id_for_query = dict_id.clone();
+    let query_word = word.clone();
     let result = tokio::task::spawn_blocking(move || {
         for file in files {
-            for candidate in &candidates {
-                if let Ok(Some((data, content_type))) =
-                    query_specific_entry(&state_cloned, &file, candidate, &dict_id_for_query)
-                {
-                    return Some((data, content_type));
-                }
+            if let Ok(Some((data, content_type))) =
+                query_specific_entry(&state_cloned, &file, &query_word, &dict_id_for_query)
+            {
+                return Some((data, content_type));
             }
         }
         None
@@ -476,26 +476,6 @@ fn build_resource_candidates(path: &str) -> Vec<String> {
     candidates
 }
 
-fn build_entry_candidates(word: &str) -> Vec<String> {
-    let mut candidates = Vec::with_capacity(2);
-
-    let raw = word.trim();
-    let trimmed = raw
-        .trim_start_matches('/')
-        .trim_start_matches('\\')
-        .trim_end_matches('/')
-        .trim_end_matches('\\');
-
-    if !raw.is_empty() {
-        candidates.push(raw.to_string());
-    }
-    if !trimmed.is_empty() && trimmed != raw {
-        candidates.push(trimmed.to_string());
-    }
-
-    candidates
-}
-
 fn push_unique_candidate(candidates: &mut Vec<String>, candidate: String) {
     if candidate.is_empty() || candidates.iter().any(|existing| existing == &candidate) {
         return;
@@ -641,9 +621,54 @@ pub struct DictQuery {
     pub id: Option<String>,
 }
 
+#[derive(Serialize)]
+pub struct DictIndexStatus {
+    pub id: String,
+    pub name: String,
+    pub file: String,
+    pub db_exists: bool,
+    pub up_to_date: bool,
+    pub has_fts: bool,
+    pub fts_enabled: bool,
+}
+
 /// GET /api/dicts - Get list of all dictionaries with their configs
 pub(crate) async fn handle_dict_list(State(state): State<AppState>) -> Json<Vec<DictInfo>> {
     Json(state.get_all_dict_info())
+}
+
+/// GET /api/index/status - Get index/FTS status for dictionaries
+pub(crate) async fn handle_index_status(
+    State(state): State<AppState>,
+) -> Json<Vec<DictIndexStatus>> {
+    let mut items = Vec::new();
+    for file in state.dict_text_files() {
+        let status = match index_status(file) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("failed to read index status for {:?}: {}", file, e);
+                continue;
+            }
+        };
+        let id = state
+            .get_dict_id(file)
+            .unwrap_or_else(|| file.to_string_lossy().to_string());
+        let fts_enabled = state
+            .get_dict_config(&id)
+            .map(|cfg| cfg.is_fts_enabled())
+            .unwrap_or(true);
+
+        items.push(DictIndexStatus {
+            id,
+            name: state.get_dict_display_name(file),
+            file: file.to_string_lossy().to_string(),
+            db_exists: status.db_exists,
+            up_to_date: status.up_to_date,
+            has_fts: status.has_fts,
+            fts_enabled,
+        });
+    }
+    Json(items)
 }
 
 /// GET /api/dict/style?id=xxx - Get custom CSS for a dictionary
