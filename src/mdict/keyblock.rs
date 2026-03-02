@@ -213,30 +213,36 @@ pub fn parse_key_block_info<'a>(
             )));
         }
 
-        // encrypted 可能是 "0", "No", "" 等表示未加密
-        let key_block_info =
-            if encrypted == "0" || encrypted.eq_ignore_ascii_case("no") || encrypted.is_empty() {
-                zlib_decompress_checked(&block_info[8..], block_info_decompressed_len, block_info)?
-            }
-            // decrypt: encrypted 为 "2" 或 "3" 表示加密
-            else if encrypted == "2" || encrypted == "3" {
-                let mut md = Ripemd128::new();
-                let mut v = Vec::from(&block_info[4..8]);
-                let value: u32 = 0x3695;
-                v.extend_from_slice(&value.to_le_bytes());
-                md.update(v);
-                let key = md.finalize();
-                let mut d = Vec::from(&block_info[0..8]);
-                let decrypted = fast_decrypt(&block_info[8..], key.as_slice());
-                d.extend(decrypted);
-                zlib_decompress_checked(&d[8..], block_info_decompressed_len, block_info)?
-            } else {
-                // Unknown encryption flag
-                return Err(nom::Err::Failure(nom::error::Error::new(
-                    block_info,
-                    nom::error::ErrorKind::Verify,
-                )));
-            };
+        // encrypted 可能是 "0", "1", "No", "" 等:
+        // - 0: no encryption
+        // - 1: record block encryption (key block info itself is not encrypted)
+        // - 2/3: key block info encryption
+        let key_block_info = if encrypted == "0"
+            || encrypted == "1"
+            || encrypted.eq_ignore_ascii_case("no")
+            || encrypted.is_empty()
+        {
+            zlib_decompress_checked(&block_info[8..], block_info_decompressed_len, block_info)?
+        }
+        // decrypt: encrypted 为 "2" 或 "3" 表示加密
+        else if encrypted == "2" || encrypted == "3" {
+            let mut md = Ripemd128::new();
+            let mut v = Vec::from(&block_info[4..8]);
+            let value: u32 = 0x3695;
+            v.extend_from_slice(&value.to_le_bytes());
+            md.update(v);
+            let key = md.finalize();
+            let mut d = Vec::from(&block_info[0..8]);
+            let decrypted = fast_decrypt(&block_info[8..], key.as_slice());
+            d.extend(decrypted);
+            zlib_decompress_checked(&d[8..], block_info_decompressed_len, block_info)?
+        } else {
+            // Unknown encryption flag
+            return Err(nom::Err::Failure(nom::error::Error::new(
+                block_info,
+                nom::error::ErrorKind::Verify,
+            )));
+        };
 
         // MDD 文件的 encoding 为空字符串，使用 UTF-16LE 编码
         // 对于 UTF-16，text length 字段是字符数，需要 * 2 得到字节数

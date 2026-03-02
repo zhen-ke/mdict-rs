@@ -2,7 +2,7 @@
 
 A simple web dictionary, built in rust, based on mdx format dictionary file.
 
-It's at an early stage of development, now only supports mdx version 2.0 with encrypted=2 or 0
+It's at an early stage of development. The parser focuses on MDX V2-compatible dictionaries (including newer engine versions), and currently supports encrypted flags 0/1/2/3.
 
 ## usage
 

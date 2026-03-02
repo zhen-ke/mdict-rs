@@ -9,7 +9,7 @@ use rusqlite::{Connection, params};
 use crate::mdict::mdx::Mdx;
 use tracing::{info, warn};
 
-const INDEX_SCHEMA_VERSION: i64 = 2;
+const INDEX_SCHEMA_VERSION: i64 = 3;
 const META_TABLE: &str = "MDX_META";
 const META_SCHEMA_VERSION: &str = "schema_version";
 const META_SOURCE_SIZE: &str = "source_size";
@@ -87,7 +87,8 @@ pub(crate) fn mdx_to_sqlite(file: &Path) -> anyhow::Result<()> {
 
     conn.execute(
         "create table if not exists MDX_INDEX (
-                text text primary key not null,
+                id integer primary key,
+                text text not null,
                 record_offset integer not null,
                 record_length integer not null,
                 block_offset integer not null,
@@ -97,6 +98,11 @@ pub(crate) fn mdx_to_sqlite(file: &Path) -> anyhow::Result<()> {
         params![],
     )
     .with_context(|| "create table failed")?;
+    conn.execute(
+        "create index if not exists idx_mdx_text on MDX_INDEX(text)",
+        params![],
+    )
+    .with_context(|| "create index failed")?;
     conn.execute(
         "create index if not exists idx_mdx_text_nocase on MDX_INDEX(text COLLATE NOCASE)",
         params![],
@@ -138,7 +144,9 @@ pub(crate) fn mdx_to_sqlite(file: &Path) -> anyhow::Result<()> {
 
     {
         let mut stmt = tx
-            .prepare_cached("insert or replace into MDX_INDEX values (?,?,?,?,?,?)")
+            .prepare_cached(
+                "insert into MDX_INDEX(text, record_offset, record_length, block_offset, block_size, block_dsize) values (?,?,?,?,?,?)",
+            )
             .with_context(|| "prepare insert statement failed")?;
         let mut fts_stmt = if fts_enabled {
             Some(
