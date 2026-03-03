@@ -40,13 +40,23 @@ pub struct QueryForm {
     word: String,
 }
 
-pub(crate) async fn handle_query(
-    State(state): State<AppState>,
-    Form(params): Form<QueryForm>,
-) -> Result<Response, AppError> {
-    let word = params.word.trim().to_string();
-    tracing::info!("Processing query for word: {}", word);
+async fn spawn_blocking_query<T, F>(
+    state: &AppState,
+    context: &'static str,
+    task: F,
+) -> Result<T, AppError>
+where
+    T: Send + 'static,
+    F: FnOnce(AppState) -> T + Send + 'static,
+{
+    let _query_slot = state.try_acquire_query_slot().ok_or(AppError::Overloaded)?;
+    let task_state = state.clone();
+    tokio::task::spawn_blocking(move || task(task_state))
+        .await
+        .map_err(|e| AppError::Internal(format!("{context} task failed: {e}")))
+}
 
+async fn query_aggregate_cached(state: &AppState, word: String) -> Result<Response, AppError> {
     let cache_key = cache_key_aggregate_entry(&word);
     let negative_key = negative_key(&cache_key);
     if let Some((data, content_type)) = state.get_entry_cached(&cache_key) {
@@ -56,12 +66,11 @@ pub(crate) async fn handle_query(
         return Err(AppError::NotFound);
     }
 
-    let _query_slot = state.try_acquire_query_slot().ok_or(AppError::Overloaded)?;
-    let query_state = state.clone();
     let query_word = word.clone();
-    let result = tokio::task::spawn_blocking(move || query_aggregate(&query_state, query_word))
-        .await
-        .map_err(|e| AppError::Internal(format!("query task failed: {}", e)))?;
+    let result = spawn_blocking_query(state, "aggregate query", move |task_state| {
+        query_aggregate(&task_state, query_word)
+    })
+    .await?;
 
     match result {
         Ok((data, content_type)) => {
@@ -78,39 +87,19 @@ pub(crate) async fn handle_query(
     }
 }
 
+pub(crate) async fn handle_query(
+    State(state): State<AppState>,
+    Form(params): Form<QueryForm>,
+) -> Result<Response, AppError> {
+    let word = params.word.trim().to_string();
+    tracing::info!("Processing query for word: {}", word);
+    query_aggregate_cached(&state, word).await
+}
+
 pub(crate) async fn handle_lucky(State(state): State<AppState>) -> Result<Response, AppError> {
     let word = lucky::lucky_word();
     tracing::info!("Lucky query for word: {}", word);
-
-    let cache_key = cache_key_aggregate_entry(&word);
-    let negative_key = negative_key(&cache_key);
-    if let Some((data, content_type)) = state.get_entry_cached(&cache_key) {
-        return Ok(ok_response(data, &content_type));
-    }
-    if state.is_negative_cached(&negative_key) {
-        return Err(AppError::NotFound);
-    }
-
-    let _query_slot = state.try_acquire_query_slot().ok_or(AppError::Overloaded)?;
-    let query_state = state.clone();
-    let query_word = word.clone();
-    let result = tokio::task::spawn_blocking(move || query_aggregate(&query_state, query_word))
-        .await
-        .map_err(|e| AppError::Internal(format!("query task failed: {}", e)))?;
-
-    match result {
-        Ok((data, content_type)) => {
-            state.put_entry_cached(cache_key, data.clone(), content_type.clone());
-            state.clear_negative_cache(&negative_key);
-            Ok(ok_response(data, &content_type))
-        }
-        Err(e) => {
-            if matches!(e, QueryError::NotFound) {
-                state.put_negative_cache(negative_key);
-            }
-            Err(AppError::from(e))
-        }
-    }
+    query_aggregate_cached(&state, word).await
 }
 
 pub(crate) async fn handle_suggest(
@@ -118,17 +107,22 @@ pub(crate) async fn handle_suggest(
     Query(params): Query<SuggestQuery>,
 ) -> Result<Json<Vec<String>>, AppError> {
     let q = params.q;
-    let _query_slot = state.try_acquire_query_slot().ok_or(AppError::Overloaded)?;
-    let state = state.clone();
-    let result = tokio::task::spawn_blocking(move || suggest(&state, q, 10)).await;
-    match result {
-        Ok(Ok(suggestions)) => Ok(Json(suggestions)),
-        Ok(Err(e)) => {
-            tracing::warn!("Suggest failed: {}", e);
-            Ok(Json(vec![]))
-        }
+    let result = match spawn_blocking_query(&state, "suggest", move |task_state| {
+        suggest(&task_state, q, 10)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(AppError::Overloaded) => return Err(AppError::Overloaded),
         Err(e) => {
             tracing::warn!("Suggest task failed: {}", e);
+            return Ok(Json(vec![]));
+        }
+    };
+    match result {
+        Ok(suggestions) => Ok(Json(suggestions)),
+        Err(e) => {
+            tracing::warn!("Suggest failed: {}", e);
             Ok(Json(vec![]))
         }
     }
@@ -141,20 +135,27 @@ pub(crate) async fn handle_trace(
     Query(params): Query<SuggestQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let q = params.q;
-    let _query_slot = state.try_acquire_query_slot().ok_or(AppError::Overloaded)?;
-    let state = state.clone();
-    let result = tokio::task::spawn_blocking(move || query_with_trace(&state, q)).await;
+    let result = match spawn_blocking_query(&state, "trace", move |task_state| {
+        query_with_trace(&task_state, q)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(AppError::Overloaded) => return Err(AppError::Overloaded),
+        Err(e) => {
+            return Ok(Json(serde_json::json!({
+                "error": format!("trace task failed: {}", e),
+            })));
+        }
+    };
     match result {
-        Ok(Ok((chain, final_word))) => Ok(Json(serde_json::json!({
+        Ok((chain, final_word)) => Ok(Json(serde_json::json!({
             "chain": chain,
             "depth": chain.len() - 1,
             "final_word": final_word,
         }))),
-        Ok(Err(e)) => Ok(Json(serde_json::json!({
-            "error": e.to_string(),
-        }))),
         Err(e) => Ok(Json(serde_json::json!({
-            "error": format!("trace task failed: {}", e),
+            "error": e.to_string(),
         }))),
     }
 }
@@ -222,11 +223,7 @@ pub(crate) async fn handle_resource(
         return not_found();
     }
 
-    let Some(_query_slot) = state.try_acquire_query_slot() else {
-        return service_unavailable();
-    };
-    let query_state = state.clone();
-    let result = tokio::task::spawn_blocking(move || {
+    let result = match spawn_blocking_query(&state, "resource query", move |query_state| {
         for candidate in &candidates {
             tracing::debug!("resource try key: {}", candidate);
             if let Ok((data, content_type)) = query(&query_state, candidate.clone()) {
@@ -235,22 +232,26 @@ pub(crate) async fn handle_resource(
         }
         None
     })
-    .await;
+    .await
+    {
+        Ok(result) => result,
+        Err(AppError::Overloaded) => return service_unavailable(),
+        Err(e) => {
+            tracing::warn!("Resource query failed: {}", e);
+            state.put_negative_cache(negative_key);
+            return not_found();
+        }
+    };
 
     match result {
-        Ok(Some((data, content_type))) => {
+        Some((data, content_type)) => {
             if should_cache_resource(&content_type, data.len()) {
                 state.put_resource_cached(cache_key, data.clone(), content_type.clone());
             }
             state.clear_negative_cache(&negative_key);
             cacheable_binary_response(data, &content_type, RESOURCE_CACHE_CONTROL, Some(&headers))
         }
-        Ok(None) => {
-            state.put_negative_cache(negative_key);
-            not_found()
-        }
-        Err(e) => {
-            tracing::warn!("Resource query task failed: {}", e);
+        None => {
             state.put_negative_cache(negative_key);
             not_found()
         }
@@ -281,13 +282,9 @@ pub(crate) async fn handle_dict_entry(
         return not_found();
     }
 
-    let Some(_query_slot) = state.try_acquire_query_slot() else {
-        return service_unavailable();
-    };
-    let state_cloned = state.clone();
     let dict_id_for_query = dict_id.clone();
     let query_word = word.clone();
-    let result = tokio::task::spawn_blocking(move || {
+    let result = match spawn_blocking_query(&state, "dict entry query", move |state_cloned| {
         for file in files {
             if let Ok(Some((data, content_type))) =
                 query_specific_entry(&state_cloned, &file, &query_word, &dict_id_for_query)
@@ -297,20 +294,24 @@ pub(crate) async fn handle_dict_entry(
         }
         None
     })
-    .await;
+    .await
+    {
+        Ok(result) => result,
+        Err(AppError::Overloaded) => return service_unavailable(),
+        Err(e) => {
+            tracing::warn!("dict entry query failed: {}", e);
+            state.put_negative_cache(negative_key);
+            return not_found();
+        }
+    };
 
     match result {
-        Ok(Some((data, content_type))) => {
+        Some((data, content_type)) => {
             state.put_entry_cached(cache_key, data.clone(), content_type.clone());
             state.clear_negative_cache(&negative_key);
             ok_response(data, &content_type)
         }
-        Ok(None) => {
-            state.put_negative_cache(negative_key);
-            not_found()
-        }
-        Err(e) => {
-            tracing::warn!("dict entry query task failed: {}", e);
+        None => {
             state.put_negative_cache(negative_key);
             not_found()
         }
@@ -373,11 +374,7 @@ async fn query_dict_resource(
     let candidates = build_resource_candidates(&path);
 
     if !files.is_empty() && !candidates.is_empty() {
-        let Some(_query_slot) = state.try_acquire_query_slot() else {
-            return service_unavailable();
-        };
-        let query_state = state.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        let result = match spawn_blocking_query(&state, "dict resource query", move |query_state| {
             for file in files {
                 for candidate in &candidates {
                     if let Ok(Some((data, content_type))) =
@@ -389,25 +386,28 @@ async fn query_dict_resource(
             }
             None
         })
-        .await;
-
-        match result {
-            Ok(Some((data, content_type))) => {
-                if should_cache_resource(&content_type, data.len()) {
-                    state.put_resource_cached(cache_key, data.clone(), content_type.clone());
-                }
-                state.clear_negative_cache(&negative_key);
-                return cacheable_binary_response(
-                    data,
-                    &content_type,
-                    RESOURCE_CACHE_CONTROL,
-                    Some(&headers),
-                );
-            }
-            Ok(None) => {}
+        .await
+        {
+            Ok(result) => result,
+            Err(AppError::Overloaded) => return service_unavailable(),
             Err(e) => {
-                tracing::warn!("dict resource query task failed: {}", e);
+                tracing::warn!("dict resource query failed: {}", e);
+                state.put_negative_cache(negative_key);
+                return not_found();
             }
+        };
+
+        if let Some((data, content_type)) = result {
+            if should_cache_resource(&content_type, data.len()) {
+                state.put_resource_cached(cache_key, data.clone(), content_type.clone());
+            }
+            state.clear_negative_cache(&negative_key);
+            return cacheable_binary_response(
+                data,
+                &content_type,
+                RESOURCE_CACHE_CONTROL,
+                Some(&headers),
+            );
         }
     }
 

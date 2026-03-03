@@ -5,10 +5,17 @@ use rusqlite::{Connection, named_params};
 use tracing::{debug, error};
 
 use crate::app_state::AppState;
+use crate::query::rewrite_html;
 
 use super::error::QueryError;
 
 pub(crate) const MAX_RESOURCE_RECORD_BYTES: usize = 32 * 1024 * 1024;
+
+pub(crate) enum EntryCandidateLookup {
+    Miss,
+    Redirect(String),
+    Hit(Bytes),
+}
 
 pub(crate) fn detect_content_type(word: &str) -> String {
     mime_guess::from_path(word)
@@ -17,7 +24,7 @@ pub(crate) fn detect_content_type(word: &str) -> String {
         .to_string()
 }
 
-pub(crate) fn extract_link_target(data: &[u8]) -> Option<String> {
+fn extract_link_target(data: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(data).ok()?;
     let first_line = text.lines().next().unwrap_or("").trim();
     let linked = first_line.strip_prefix("@@@LINK=")?.trim();
@@ -38,6 +45,31 @@ pub(crate) fn extract_link_target(data: &[u8]) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+pub(crate) fn lookup_entry_candidate(
+    state: &AppState,
+    file: &Path,
+    candidate: &str,
+) -> Result<EntryCandidateLookup, QueryError> {
+    let Some(data) = lookup_record_in_file(state, file, candidate, None)? else {
+        return Ok(EntryCandidateLookup::Miss);
+    };
+    if let Some(linked_word) = extract_link_target(&data) {
+        return Ok(EntryCandidateLookup::Redirect(linked_word));
+    }
+    Ok(EntryCandidateLookup::Hit(data))
+}
+
+pub(crate) fn rewrite_entry_html_record(data: Bytes, dict_id: &str) -> Bytes {
+    let rewritten = match std::str::from_utf8(&data) {
+        Ok(text) => rewrite_html(text, dict_id),
+        Err(_) => {
+            let text = String::from_utf8_lossy(&data);
+            rewrite_html(text.as_ref(), dict_id)
+        }
+    };
+    Bytes::from(rewritten)
 }
 
 pub(crate) fn lookup_record_in_file(

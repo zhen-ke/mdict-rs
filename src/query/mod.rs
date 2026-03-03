@@ -12,6 +12,7 @@ pub use specific::{query_specific_entry, query_specific_resource};
 
 pub(crate) use normalize::entry_query_candidates;
 pub(crate) use repository::{
-    MAX_RESOURCE_RECORD_BYTES, detect_content_type, extract_link_target, lookup_record_in_file,
+    EntryCandidateLookup, MAX_RESOURCE_RECORD_BYTES, detect_content_type, lookup_entry_candidate,
+    lookup_record_in_file, rewrite_entry_html_record,
 };
 pub(crate) use rewrite::rewrite_html;

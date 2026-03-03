@@ -10,9 +10,9 @@ use super::entry_query_candidates;
 use super::error::QueryError;
 use super::presenter::{AggregateSection, render_aggregate_html};
 use super::repository::{
-    MAX_RESOURCE_RECORD_BYTES, detect_content_type, extract_link_target, lookup_record_in_file,
+    EntryCandidateLookup, MAX_RESOURCE_RECORD_BYTES, detect_content_type, lookup_entry_candidate,
+    lookup_record_in_file, rewrite_entry_html_record,
 };
-use super::rewrite::rewrite_html;
 use super::specific::query_specific_entry;
 
 const MAX_REDIRECT_DEPTH: u8 = 5;
@@ -177,44 +177,33 @@ fn query_internal(
 
     for file in files {
         for candidate in &candidates {
-            let max_record_length = if is_resource_key(candidate) {
-                Some(MAX_RESOURCE_RECORD_BYTES)
-            } else {
-                None
-            };
-            let Some(data) = lookup_record_in_file(state, file, candidate, max_record_length)?
-            else {
-                continue;
-            };
+            if is_resource_key(candidate) {
+                let Some(data) =
+                    lookup_record_in_file(state, file, candidate, Some(MAX_RESOURCE_RECORD_BYTES))?
+                else {
+                    continue;
+                };
+                return Ok((data, detect_content_type(candidate)));
+            }
 
-            if !is_resource_key(candidate) {
-                if let Some(linked_word) = extract_link_target(&data) {
+            match lookup_entry_candidate(state, file, candidate)? {
+                EntryCandidateLookup::Miss => continue,
+                EntryCandidateLookup::Redirect(linked_word) => {
                     info!(
                         "following @@@LINK redirect: {} (candidate {}) -> {}",
                         w, candidate, linked_word
                     );
                     return query_internal(state, linked_word, depth + 1);
                 }
-            }
-
-            let mut final_data = data;
-            let content_type = if is_resource_key(candidate) {
-                detect_content_type(candidate)
-            } else {
-                if let Some(dict_id) = state.get_dict_id(file) {
-                    let rewritten = match std::str::from_utf8(&final_data) {
-                        Ok(text) => rewrite_html(text, &dict_id),
-                        Err(_) => {
-                            let text = String::from_utf8_lossy(&final_data);
-                            rewrite_html(text.as_ref(), &dict_id)
-                        }
+                EntryCandidateLookup::Hit(data) => {
+                    let html = if let Some(dict_id) = state.get_dict_id(file) {
+                        rewrite_entry_html_record(data, &dict_id)
+                    } else {
+                        data
                     };
-                    final_data = Bytes::from(rewritten);
+                    return Ok((html, "text/html".to_string()));
                 }
-                "text/html".to_string()
-            };
-
-            return Ok((final_data, content_type));
+            }
         }
     }
     Err(QueryError::NotFound)
@@ -224,10 +213,10 @@ fn get_link_target(state: &AppState, word: &str) -> Option<String> {
     let candidates = entry_query_candidates(word);
     for file in state.dict_text_files() {
         for candidate in &candidates {
-            let Ok(Some(data)) = lookup_record_in_file(state, file, candidate, None) else {
+            let Ok(lookup) = lookup_entry_candidate(state, file, candidate) else {
                 continue;
             };
-            if let Some(linked_word) = extract_link_target(&data) {
+            if let EntryCandidateLookup::Redirect(linked_word) = lookup {
                 return Some(linked_word);
             }
         }

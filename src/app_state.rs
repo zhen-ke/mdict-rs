@@ -30,28 +30,121 @@ struct CachedPayload {
     expires_at: Instant,
 }
 
+struct DictCatalog {
+    dict_text_files: Vec<PathBuf>,
+    dict_resource_files: Vec<PathBuf>,
+    dict_configs_by_path: HashMap<PathBuf, DictConfig>,
+    dict_configs_by_id: HashMap<String, DictConfig>,
+    id_to_primary_text: HashMap<String, PathBuf>,
+    dict_id_map: HashMap<String, Vec<PathBuf>>,
+    path_to_id: HashMap<PathBuf, String>,
+}
+
+impl DictCatalog {
+    fn from_dict_files(dict_files: &[PathBuf]) -> Self {
+        let dict_text_files: Vec<PathBuf> = dict_files
+            .iter()
+            .filter(|p| AppState::is_mdx_file(p))
+            .cloned()
+            .collect();
+
+        let mut mdd = Vec::new();
+        let mut mdx = Vec::new();
+        for file in dict_files {
+            if AppState::is_mdd_file(file) {
+                mdd.push(file.clone());
+            } else {
+                mdx.push(file.clone());
+            }
+        }
+        mdd.extend(mdx);
+        let dict_resource_files = mdd;
+
+        let mut dict_configs_by_path = HashMap::new();
+        for file in &dict_text_files {
+            if let Some(cfg) = DictConfig::load(file) {
+                dict_configs_by_path.insert(file.clone(), cfg);
+            }
+        }
+
+        let mut dict_id_map: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        let mut path_to_id = HashMap::new();
+        let mut id_to_logical = HashMap::new();
+
+        for file in dict_files {
+            let logical_key = AppState::logical_dict_key(file);
+            let id = AppState::allocate_dict_id(&logical_key, &mut id_to_logical);
+            dict_id_map
+                .entry(id.clone())
+                .or_default()
+                .push(file.clone());
+            path_to_id.insert(file.clone(), id);
+        }
+
+        let mut id_to_primary_text = HashMap::new();
+        let mut dict_configs_by_id = HashMap::new();
+        for (id, files) in &dict_id_map {
+            let mut text_files: Vec<PathBuf> = files
+                .iter()
+                .filter(|f| AppState::is_mdx_file(f))
+                .cloned()
+                .collect();
+            text_files.sort();
+
+            if let Some(primary_text) = text_files.into_iter().next() {
+                id_to_primary_text.insert(id.clone(), primary_text.clone());
+                if let Some(cfg) = dict_configs_by_path.get(&primary_text) {
+                    dict_configs_by_id.insert(id.clone(), cfg.clone());
+                }
+            }
+        }
+
+        Self {
+            dict_text_files,
+            dict_resource_files,
+            dict_configs_by_path,
+            dict_configs_by_id,
+            id_to_primary_text,
+            dict_id_map,
+            path_to_id,
+        }
+    }
+}
+
+struct RuntimeState {
+    db_pools: RwLock<HashMap<PathBuf, Pool<SqliteConnectionManager>>>,
+    mdx_readers: RwLock<HashMap<PathBuf, Arc<MdxReader>>>,
+    blocking_query_slots: Arc<Semaphore>,
+    entry_cache: Mutex<LruCache<String, CachedPayload>>,
+    resource_cache: Mutex<LruCache<String, CachedPayload>>,
+    negative_cache: Mutex<LruCache<String, Instant>>,
+}
+
+impl RuntimeState {
+    fn new(max_concurrent_blocking_queries: usize) -> Self {
+        Self {
+            db_pools: RwLock::new(HashMap::new()),
+            mdx_readers: RwLock::new(HashMap::new()),
+            blocking_query_slots: Arc::new(Semaphore::new(max_concurrent_blocking_queries)),
+            entry_cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(ENTRY_CACHE_SIZE).expect("ENTRY_CACHE_SIZE > 0"),
+            )),
+            resource_cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(RESOURCE_CACHE_SIZE).expect("RESOURCE_CACHE_SIZE > 0"),
+            )),
+            negative_cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(NEGATIVE_CACHE_SIZE).expect("NEGATIVE_CACHE_SIZE > 0"),
+            )),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     dict_dir: Arc<PathBuf>,
     static_dir: Arc<PathBuf>,
-
-    dict_text_files: Arc<Vec<PathBuf>>,
-    dict_resource_files: Arc<Vec<PathBuf>>,
-
-    dict_configs_by_path: Arc<HashMap<PathBuf, DictConfig>>,
-    dict_configs_by_id: Arc<HashMap<String, DictConfig>>,
-    id_to_primary_text: Arc<HashMap<String, PathBuf>>,
-
-    // Mapping between ID and File Path
-    dict_id_map: Arc<HashMap<String, Vec<PathBuf>>>,
-    path_to_id: Arc<HashMap<PathBuf, String>>,
-
-    db_pools: Arc<RwLock<HashMap<PathBuf, Pool<SqliteConnectionManager>>>>,
-    mdx_readers: Arc<RwLock<HashMap<PathBuf, Arc<MdxReader>>>>,
-    blocking_query_slots: Arc<Semaphore>,
-    entry_cache: Arc<Mutex<LruCache<String, CachedPayload>>>,
-    resource_cache: Arc<Mutex<LruCache<String, CachedPayload>>>,
-    negative_cache: Arc<Mutex<LruCache<String, Instant>>>,
+    catalog: Arc<DictCatalog>,
+    runtime: Arc<RuntimeState>,
 }
 
 impl AppState {
@@ -63,89 +156,14 @@ impl AppState {
                 .filter(|v| *v > 0)
                 .unwrap_or(DEFAULT_MAX_CONCURRENT_BLOCKING_QUERIES);
 
-        let dict_text_files: Vec<PathBuf> = dict_files
-            .iter()
-            .filter(|p| Self::is_mdx_file(p))
-            .cloned()
-            .collect();
-
-        let mut mdd = Vec::new();
-        let mut mdx = Vec::new();
-        for file in &dict_files {
-            if Self::is_mdd_file(file) {
-                mdd.push(file.clone());
-            } else {
-                mdx.push(file.clone());
-            }
-        }
-        mdd.extend(mdx);
-        let dict_resource_files = mdd;
-
-        let mut configs_by_path = HashMap::new();
-        for file in &dict_text_files {
-            if let Some(cfg) = DictConfig::load(file) {
-                configs_by_path.insert(file.clone(), cfg);
-            }
-        }
-
-        // Initialize ID mappings
-        let mut dict_id_map: HashMap<String, Vec<PathBuf>> = HashMap::new();
-        let mut path_to_id = HashMap::new();
-        let mut id_to_logical = HashMap::new();
-
-        // Generate IDs for all files
-        for file in &dict_files {
-            // Use file stem + parent path to identify "logical dictionary"
-            let logical_key = Self::logical_dict_key(file);
-            let id = Self::allocate_dict_id(&logical_key, &mut id_to_logical);
-
-            dict_id_map
-                .entry(id.clone())
-                .or_default()
-                .push(file.clone());
-            path_to_id.insert(file.clone(), id);
-        }
-
-        let mut id_to_primary_text = HashMap::new();
-        let mut configs_by_id = HashMap::new();
-        for (id, files) in &dict_id_map {
-            let mut text_files: Vec<PathBuf> = files
-                .iter()
-                .filter(|f| Self::is_mdx_file(f))
-                .cloned()
-                .collect();
-            text_files.sort();
-
-            if let Some(primary_text) = text_files.into_iter().next() {
-                id_to_primary_text.insert(id.clone(), primary_text.clone());
-                if let Some(cfg) = configs_by_path.get(&primary_text) {
-                    configs_by_id.insert(id.clone(), cfg.clone());
-                }
-            }
-        }
+        let catalog = DictCatalog::from_dict_files(&dict_files);
+        let runtime = RuntimeState::new(max_concurrent_blocking_queries);
 
         Self {
             dict_dir: Arc::new(dict_dir),
             static_dir: Arc::new(static_dir),
-            dict_text_files: Arc::new(dict_text_files),
-            dict_resource_files: Arc::new(dict_resource_files),
-            dict_configs_by_path: Arc::new(configs_by_path),
-            dict_configs_by_id: Arc::new(configs_by_id),
-            id_to_primary_text: Arc::new(id_to_primary_text),
-            dict_id_map: Arc::new(dict_id_map),
-            path_to_id: Arc::new(path_to_id),
-            db_pools: Arc::new(RwLock::new(HashMap::new())),
-            mdx_readers: Arc::new(RwLock::new(HashMap::new())),
-            blocking_query_slots: Arc::new(Semaphore::new(max_concurrent_blocking_queries)),
-            entry_cache: Arc::new(Mutex::new(LruCache::new(
-                NonZeroUsize::new(ENTRY_CACHE_SIZE).expect("ENTRY_CACHE_SIZE > 0"),
-            ))),
-            resource_cache: Arc::new(Mutex::new(LruCache::new(
-                NonZeroUsize::new(RESOURCE_CACHE_SIZE).expect("RESOURCE_CACHE_SIZE > 0"),
-            ))),
-            negative_cache: Arc::new(Mutex::new(LruCache::new(
-                NonZeroUsize::new(NEGATIVE_CACHE_SIZE).expect("NEGATIVE_CACHE_SIZE > 0"),
-            ))),
+            catalog: Arc::new(catalog),
+            runtime: Arc::new(runtime),
         }
     }
 
@@ -158,19 +176,19 @@ impl AppState {
     }
 
     pub fn dict_text_files(&self) -> &[PathBuf] {
-        &self.dict_text_files
+        &self.catalog.dict_text_files
     }
 
     pub fn dict_resource_files(&self) -> &[PathBuf] {
-        &self.dict_resource_files
+        &self.catalog.dict_resource_files
     }
 
     pub fn get_dict_id(&self, path: &Path) -> Option<String> {
-        self.path_to_id.get(path).cloned()
+        self.catalog.path_to_id.get(path).cloned()
     }
 
     pub fn get_dict_files(&self, id: &str) -> Option<&Vec<PathBuf>> {
-        self.dict_id_map.get(id)
+        self.catalog.dict_id_map.get(id)
     }
 
     pub fn get_dict_text_files_by_id(&self, id: &str) -> Vec<PathBuf> {
@@ -210,24 +228,24 @@ impl AppState {
     }
 
     pub fn get_dict_config(&self, dict_id: &str) -> Option<DictConfig> {
-        if let Some(cfg) = self.dict_configs_by_id.get(dict_id) {
+        if let Some(cfg) = self.catalog.dict_configs_by_id.get(dict_id) {
             return Some(cfg.clone());
         }
 
-        // Backward compatibility for older clients that still send file paths as id.
         let path = PathBuf::from(dict_id);
-        self.dict_configs_by_path.get(&path).cloned()
+        self.catalog.dict_configs_by_path.get(&path).cloned()
     }
 
     pub fn get_all_dict_info(&self) -> Vec<DictInfo> {
-        let mut ids: Vec<&String> = self.id_to_primary_text.keys().collect();
+        let mut ids: Vec<&String> = self.catalog.id_to_primary_text.keys().collect();
         ids.sort();
 
         ids.into_iter()
             .filter_map(|id| {
-                let file = self.id_to_primary_text.get(id)?;
+                let file = self.catalog.id_to_primary_text.get(id)?;
                 let default_config = DictConfig::default();
                 let cfg = self
+                    .catalog
                     .dict_configs_by_path
                     .get(file)
                     .unwrap_or(&default_config);
@@ -246,14 +264,16 @@ impl AppState {
 
     pub fn get_dict_display_name(&self, dict_path: &Path) -> String {
         let default_config = DictConfig::default();
-        self.dict_configs_by_path
+        self.catalog
+            .dict_configs_by_path
             .get(dict_path)
             .unwrap_or(&default_config)
             .get_display_name(dict_path)
     }
 
     pub fn get_dict_container_class(&self, dict_path: &Path) -> Option<String> {
-        self.dict_configs_by_path
+        self.catalog
+            .dict_configs_by_path
             .get(dict_path)
             .and_then(|cfg| cfg.container_class.clone())
     }
@@ -271,7 +291,6 @@ impl AppState {
                     | OpenFlags::SQLITE_OPEN_URI,
             )
             .with_init(|conn| {
-                // Read-path tuning only: avoid any DDL/pragma that requires writes.
                 let _ = conn.pragma_update(None, "cache_size", "-64000");
                 let _ = conn.pragma_update(None, "temp_store", "MEMORY");
                 Ok(())
@@ -292,6 +311,7 @@ impl AppState {
     ) -> anyhow::Result<r2d2::PooledConnection<SqliteConnectionManager>> {
         let dict_file = dict_file.to_path_buf();
         if let Some(pool) = self
+            .runtime
             .db_pools
             .read()
             .expect("db_pools rwlock poisoned")
@@ -310,7 +330,11 @@ impl AppState {
 
         let built_pool = Self::build_pool(&db_file)?;
         let pool = {
-            let mut guard = self.db_pools.write().expect("db_pools rwlock poisoned");
+            let mut guard = self
+                .runtime
+                .db_pools
+                .write()
+                .expect("db_pools rwlock poisoned");
             guard.entry(dict_file).or_insert(built_pool).clone()
         };
 
@@ -321,6 +345,7 @@ impl AppState {
     pub fn get_mdx_reader(&self, dict_file: &Path) -> anyhow::Result<Arc<MdxReader>> {
         let dict_file = dict_file.to_path_buf();
         if let Some(reader) = self
+            .runtime
             .mdx_readers
             .read()
             .expect("mdx_readers rwlock poisoned")
@@ -333,6 +358,7 @@ impl AppState {
         let reader = Arc::new(MdxReader::new(&dict_file)?);
         let entry = {
             let mut guard = self
+                .runtime
                 .mdx_readers
                 .write()
                 .expect("mdx_readers rwlock poisoned");
@@ -342,20 +368,26 @@ impl AppState {
     }
 
     pub fn get_entry_cached(&self, key: &str) -> Option<(Bytes, String)> {
-        Self::cache_get(&self.entry_cache, key)
+        Self::cache_get(&self.runtime.entry_cache, key)
     }
 
     pub fn put_entry_cached(&self, key: String, data: Bytes, content_type: String) {
-        Self::cache_put(&self.entry_cache, key, data, content_type, ENTRY_CACHE_TTL);
+        Self::cache_put(
+            &self.runtime.entry_cache,
+            key,
+            data,
+            content_type,
+            ENTRY_CACHE_TTL,
+        );
     }
 
     pub fn get_resource_cached(&self, key: &str) -> Option<(Bytes, String)> {
-        Self::cache_get(&self.resource_cache, key)
+        Self::cache_get(&self.runtime.resource_cache, key)
     }
 
     pub fn put_resource_cached(&self, key: String, data: Bytes, content_type: String) {
         Self::cache_put(
-            &self.resource_cache,
+            &self.runtime.resource_cache,
             key,
             data,
             content_type,
@@ -366,6 +398,7 @@ impl AppState {
     pub fn is_negative_cached(&self, key: &str) -> bool {
         let now = Instant::now();
         let mut cache = self
+            .runtime
             .negative_cache
             .lock()
             .expect("negative_cache mutex poisoned");
@@ -380,21 +413,27 @@ impl AppState {
 
     pub fn put_negative_cache(&self, key: String) {
         let expiry = Instant::now() + NEGATIVE_CACHE_TTL;
-        self.negative_cache
+        self.runtime
+            .negative_cache
             .lock()
             .expect("negative_cache mutex poisoned")
             .put(key, expiry);
     }
 
     pub fn clear_negative_cache(&self, key: &str) {
-        self.negative_cache
+        self.runtime
+            .negative_cache
             .lock()
             .expect("negative_cache mutex poisoned")
             .pop(key);
     }
 
     pub fn try_acquire_query_slot(&self) -> Option<OwnedSemaphorePermit> {
-        self.blocking_query_slots.clone().try_acquire_owned().ok()
+        self.runtime
+            .blocking_query_slots
+            .clone()
+            .try_acquire_owned()
+            .ok()
     }
 
     fn is_mdx_file(path: &Path) -> bool {
@@ -437,7 +476,7 @@ impl AppState {
     }
 
     fn cache_get(
-        cache: &Arc<Mutex<LruCache<String, CachedPayload>>>,
+        cache: &Mutex<LruCache<String, CachedPayload>>,
         key: &str,
     ) -> Option<(Bytes, String)> {
         let now = Instant::now();
@@ -452,7 +491,7 @@ impl AppState {
     }
 
     fn cache_put(
-        cache: &Arc<Mutex<LruCache<String, CachedPayload>>>,
+        cache: &Mutex<LruCache<String, CachedPayload>>,
         key: String,
         data: Bytes,
         content_type: String,
@@ -488,7 +527,6 @@ mod tests {
         let mut id_to_logical = HashMap::new();
         let base = AppState::allocate_dict_id("dict-key", &mut id_to_logical);
 
-        // Simulate a rare hash collision on the base ID.
         id_to_logical.insert(base.clone(), "other-dict-key".to_string());
         let resolved = AppState::allocate_dict_id("dict-key", &mut id_to_logical);
 
