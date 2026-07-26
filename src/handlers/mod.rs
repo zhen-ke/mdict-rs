@@ -12,10 +12,11 @@ use crate::config::DictInfo;
 use crate::indexing::index_status;
 use crate::lucky;
 use crate::query::{
-    QueryError, query, query_aggregate, query_specific_entry, query_specific_resource,
+    DictFilter, QueryError, query, query_aggregate, query_specific_entry, query_specific_resource,
     query_with_trace, suggest,
 };
 use serde_derive::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path as FsPath, PathBuf};
 
 use axum::{
@@ -33,11 +34,24 @@ const MAX_CACHEABLE_MEDIA_BYTES: usize = 256 * 1024;
 #[derive(Deserialize, Debug)]
 pub struct SuggestQuery {
     q: String,
+    /// Optional comma-separated dict IDs to restrict search scope.
+    dicts: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
 pub struct QueryForm {
     word: String,
+    /// Optional comma-separated dict IDs to restrict search scope.
+    dicts: Option<String>,
+}
+
+/// Parse an optional comma-separated dict-id string into a `DictFilter`.
+///
+/// Returns `None` (= all dicts) when the input is absent or empty.
+fn parse_dict_filter(raw: &Option<String>) -> DictFilter {
+    let Some(s) = raw else { return None };
+    let ids: HashSet<String> = s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
+    if ids.is_empty() { None } else { Some(ids) }
 }
 
 async fn spawn_blocking_query<T, F>(
@@ -56,8 +70,12 @@ where
         .map_err(|e| AppError::Internal(format!("{context} task failed: {e}")))
 }
 
-async fn query_aggregate_cached(state: &AppState, word: String) -> Result<Response, AppError> {
-    let cache_key = cache_key_aggregate_entry(&word);
+async fn query_aggregate_cached(
+    state: &AppState,
+    word: String,
+    filter: DictFilter,
+) -> Result<Response, AppError> {
+    let cache_key = cache_key_aggregate_entry(&word, &filter);
     let negative_key = negative_key(&cache_key);
     if let Some((data, content_type)) = state.get_entry_cached(&cache_key) {
         return Ok(ok_response(data, &content_type));
@@ -68,7 +86,7 @@ async fn query_aggregate_cached(state: &AppState, word: String) -> Result<Respon
 
     let query_word = word.clone();
     let result = spawn_blocking_query(state, "aggregate query", move |task_state| {
-        query_aggregate(&task_state, query_word)
+        query_aggregate(&task_state, query_word, &filter)
     })
     .await?;
 
@@ -92,14 +110,16 @@ pub(crate) async fn handle_query(
     Form(params): Form<QueryForm>,
 ) -> Result<Response, AppError> {
     let word = params.word.trim().to_string();
-    tracing::info!("Processing query for word: {}", word);
-    query_aggregate_cached(&state, word).await
+    let filter = parse_dict_filter(&params.dicts);
+    tracing::info!("Processing query for word: {}, filter: {:?}", word, filter);
+    query_aggregate_cached(&state, word, filter).await
 }
 
 pub(crate) async fn handle_lucky(State(state): State<AppState>) -> Result<Response, AppError> {
-    let word = lucky::lucky_word();
+    let word = lucky::lucky_word(&state);
     tracing::info!("Lucky query for word: {}", word);
-    query_aggregate_cached(&state, word).await
+    // Lucky always queries all dicts — it's about discovery.
+    query_aggregate_cached(&state, word, None).await
 }
 
 pub(crate) async fn handle_suggest(
@@ -107,8 +127,9 @@ pub(crate) async fn handle_suggest(
     Query(params): Query<SuggestQuery>,
 ) -> Result<Json<Vec<String>>, AppError> {
     let q = params.q;
+    let filter = parse_dict_filter(&params.dicts);
     let result = match spawn_blocking_query(&state, "suggest", move |task_state| {
-        suggest(&task_state, q, 10)
+        suggest(&task_state, q, 10, &filter)
     })
     .await
     {
@@ -563,10 +584,17 @@ async fn resolve_static_file(
     })
 }
 
-fn cache_key_aggregate_entry(word: &str) -> String {
-    let mut key = String::with_capacity("entry:aggregate:".len() + word.len());
+fn cache_key_aggregate_entry(word: &str, filter: &DictFilter) -> String {
+    let mut key = String::with_capacity("entry:aggregate:".len() + word.len() + 32);
     key.push_str("entry:aggregate:");
     push_trimmed_lowercase(&mut key, word);
+    if let Some(ids) = filter {
+        // Deterministic key: sort dict IDs so {a,b} and {b,a} produce the same key.
+        let mut sorted: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+        sorted.sort_unstable();
+        key.push(':');
+        key.push_str(&sorted.join(","));
+    }
     key
 }
 

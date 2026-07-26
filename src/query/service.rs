@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use axum::body::Bytes;
 use rusqlite::{Connection, named_params};
@@ -15,6 +16,9 @@ use super::repository::{
 };
 use super::specific::query_specific_entry;
 
+/// Optional dict-id filter.  `None` = query all dicts (backward compatible).
+pub type DictFilter = Option<HashSet<String>>;
+
 const MAX_REDIRECT_DEPTH: u8 = 5;
 const TRACE_REDIRECT_DEPTH: u8 = 10;
 
@@ -24,11 +28,17 @@ pub fn query(state: &AppState, word: String) -> Result<(Bytes, String), QueryErr
 
 /// Aggregate query results from all enabled text dictionaries.
 /// Used by `/query` and `/lucky` so the frontend can show multiple dictionary entries together.
-pub fn query_aggregate(state: &AppState, word: String) -> Result<(Bytes, String), QueryError> {
+///
+/// When `filter` is `Some`, only dictionaries whose id is in the set are queried.
+pub fn query_aggregate(
+    state: &AppState,
+    word: String,
+    filter: &DictFilter,
+) -> Result<(Bytes, String), QueryError> {
     if is_resource_key(&word) {
         return query(state, word);
     }
-    query_aggregate_entries(state, &word)
+    query_aggregate_entries(state, &word, filter)
 }
 
 /// Query with trace - returns the redirect chain and final word
@@ -63,9 +73,38 @@ pub(crate) fn is_resource_key(word: &str) -> bool {
     word.starts_with('\\') || word.starts_with('/')
 }
 
+/// Apply an optional dict-id filter to the file list.
+///
+/// Returns the full list unchanged when filter is `None`, or only the files
+/// whose dict_id is in the allowed set.
+fn filter_dict_files<'a>(
+    files: &'a [PathBuf],
+    state: &AppState,
+    filter: &DictFilter,
+) -> Vec<&'a PathBuf> {
+    match filter {
+        None => files.iter().collect(),
+        Some(allowed) => files
+            .iter()
+            .filter(|f| {
+                state
+                    .get_dict_id(f)
+                    .is_some_and(|id| allowed.contains(&id))
+            })
+            .collect(),
+    }
+}
+
 /// 返回以指定前缀开头的词条列表（用于搜索建议）
 /// 使用 FTS5 + bm25 排序
-pub fn suggest(state: &AppState, prefix: String, limit: usize) -> Result<Vec<String>, QueryError> {
+///
+/// When `filter` is `Some`, only dictionaries whose id is in the set are searched.
+pub fn suggest(
+    state: &AppState,
+    prefix: String,
+    limit: usize,
+    filter: &DictFilter,
+) -> Result<Vec<String>, QueryError> {
     let trimmed = prefix.trim();
     if trimmed.len() < 2 || limit == 0 {
         return Ok(vec![]);
@@ -79,7 +118,7 @@ pub fn suggest(state: &AppState, prefix: String, limit: usize) -> Result<Vec<Str
     let query_limit = limit * 20;
     let mut scores: HashMap<String, i32> = HashMap::new();
 
-    for file in state.dict_text_files() {
+    for file in filter_dict_files(state.dict_text_files(), state, filter) {
         let conn = match state.get_db_connection(file) {
             Ok(c) => c,
             Err(e) => {
@@ -224,10 +263,14 @@ fn get_link_target(state: &AppState, word: &str) -> Option<String> {
     None
 }
 
-fn query_aggregate_entries(state: &AppState, word: &str) -> Result<(Bytes, String), QueryError> {
+fn query_aggregate_entries(
+    state: &AppState,
+    word: &str,
+    filter: &DictFilter,
+) -> Result<(Bytes, String), QueryError> {
     let mut sections = Vec::new();
 
-    for file in state.dict_text_files() {
+    for file in filter_dict_files(state.dict_text_files(), state, filter) {
         let Some(dict_id) = state.get_dict_id(file) else {
             continue;
         };
