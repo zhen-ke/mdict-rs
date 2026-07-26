@@ -3,11 +3,8 @@
 <head>
     <meta charset="UTF-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    <meta name="description" content="MDX 极速词典 - Rust + Sled 驱动，极致轻量高效"/>
+    <meta name="description" content="MDX 极速词典 - Rust + SQLite 驱动，极致轻量高效"/>
     <meta name="theme-color" content="#0f172a"/>
-    <link rel="preconnect" href="https://fonts.googleapis.com"/>
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet"/>
     <script src="jquery.min.js"></script>
     <script src="index.js"></script>
     <link rel="stylesheet" type="text/css" href="index.css"/>
@@ -15,10 +12,21 @@
     <title>MDict 极速词典</title>
 </head>
 <body>
+    <!-- SVG 图标精灵：用 <use href="#icon-xxx"/> 引用，避免 emoji 跨平台渲染差异 -->
+    <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+        <symbol id="icon-book" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H19a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H5.5A1.5 1.5 0 0 0 4 20.5z"/><path d="M4 20.5A1.5 1.5 0 0 1 5.5 19H20"/></symbol>
+        <symbol id="icon-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
+        <symbol id="icon-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1"/></symbol>
+        <symbol id="icon-x-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6"/><path d="m15 9-6 6"/></symbol>
+        <symbol id="icon-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l2.5 2"/></symbol>
+        <symbol id="icon-filter" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18l-7 8v5l-4 2v-7z"/></symbol>
+        <symbol id="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m20 6-11 11-5-5"/></symbol>
+    </svg>
+
     <div class="container">
         <header>
             <div class="logo">
-                <div class="logo-icon">📖</div>
+                <div class="logo-icon"><svg class="icon"><use href="#icon-book"/></svg></div>
                 <h1>MDict 极速词典</h1>
             </div>
             <p class="subtitle">Rust + SQLite 驱动，轻量高效</p>
@@ -41,14 +49,10 @@
         </div>
 
         <div class="result-card">
-            <div class="result-header">
-                <div class="result-icon">📝</div>
-                <span class="result-title">查询结果</span>
-                <button id="share-btn" class="share-btn" title="复制分享链接" style="display: none;">🔗 分享</button>
-            </div>
+            <button id="share-btn" class="share-btn" title="复制分享链接" style="display: none;"><svg class="icon"><use href="#icon-link"/></svg> 分享</button>
             <div id="mdx-resp" class="lm6">
                 <div class="empty-state">
-                    <div class="empty-state-icon">🔍</div>
+                    <div class="empty-state-icon"><svg class="icon"><use href="#icon-search"/></svg></div>
                     <p>请在上方输入单词开始查询</p>
                 </div>
             </div>

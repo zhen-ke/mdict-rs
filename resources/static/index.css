@@ -18,8 +18,22 @@
     box-sizing: border-box;
 }
 
+/* 内联 SVG 图标基线样式 */
+.icon {
+    display: inline-block;
+    width: 1.2em;
+    height: 1.2em;
+    vertical-align: -0.15em;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.75;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    pointer-events: none;
+}
+
 body {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', system-ui, sans-serif;
     background: var(--bg);
     color: var(--text);
     min-height: 100vh;
@@ -53,7 +67,12 @@ header {
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 24px;
+    color: #fff;
+}
+
+.logo-icon .icon {
+    width: 26px;
+    height: 26px;
 }
 
 h1 {
@@ -72,8 +91,12 @@ h1 {
 
 /* Search Box */
 .search-container {
-    position: relative;
-    margin-bottom: 32px;
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    background: var(--bg);
+    padding: 12px 0 6px;
+    margin-bottom: 28px;
 }
 
 .search-box {
@@ -200,6 +223,7 @@ kbd {
 
 /* Result Card */
 .result-card {
+    position: relative;
     background: var(--bg-card);
     border-radius: 16px;
     border: 1px solid var(--border);
@@ -207,34 +231,12 @@ kbd {
     box-shadow: 0 4px 24px rgba(0, 0, 0, 0.2);
 }
 
-.result-header {
-    background: linear-gradient(135deg, var(--bg-input), var(--bg-card));
-    padding: 16px 24px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    gap: 12px;
-}
-
-.result-icon {
-    width: 32px;
-    height: 32px;
-    background: var(--primary);
-    border-radius: 8px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 16px;
-}
-
-.result-title {
-    font-weight: 500;
-    color: var(--text);
-}
-
 .share-btn {
-    margin-left: auto;
-    background: transparent;
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    z-index: 10;
+    background: rgba(30, 41, 59, 0.85);
     border: 1px solid var(--border);
     color: var(--text-muted);
     padding: 6px 14px;
@@ -243,6 +245,15 @@ kbd {
     cursor: pointer;
     transition: all 0.15s;
     font-family: inherit;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+}
+
+.share-btn .icon {
+    width: 14px;
+    height: 14px;
+    vertical-align: -2px;
+    margin-right: 4px;
 }
 
 .share-btn:hover {
@@ -324,6 +335,13 @@ kbd {
     padding: 12px 14px;
     border-bottom: 1px solid rgba(148, 163, 184, 0.25);
     background: linear-gradient(135deg, rgba(51, 65, 85, 0.8), rgba(30, 41, 59, 0.7));
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s;
+}
+
+#mdx-resp .mdict-dict-head:hover {
+    background: linear-gradient(135deg, rgba(61, 75, 95, 0.85), rgba(40, 51, 69, 0.75));
 }
 
 #mdx-resp .mdict-dict-title {
@@ -350,7 +368,7 @@ kbd {
 
 #mdx-resp .mdict-dict-name {
     font-size: 1.02rem;
-    font-weight: 650;
+    font-weight: 600;
     color: #f8fafc;
     white-space: nowrap;
     overflow: hidden;
@@ -358,6 +376,7 @@ kbd {
 }
 
 #mdx-resp .mdict-dict-id {
+    display: none; /* 调试信息，默认隐藏；?debug 时通过 .show-dict-id 重新打开 */
     font-size: 0.76rem;
     color: #94a3b8;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
@@ -369,8 +388,93 @@ kbd {
     padding: 2px 8px;
 }
 
+#mdx-resp.show-dict-id .mdict-dict-id {
+    display: inline-block;
+}
+
 #mdx-resp .mdict-dict-body {
     padding: 12px 14px;
+    transition: none;
+}
+
+/* Collapse/expand toggle arrow */
+#mdx-resp .mdict-dict-toggle {
+    width: 20px;
+    height: 20px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-size: 0.7rem;
+    color: #94a3b8;
+    transition: transform 0.2s ease;
+    margin-left: auto;
+}
+
+/* Collapsed state */
+#mdx-resp .mdict-dict-section.collapsed .mdict-dict-body {
+    display: none;
+}
+
+#mdx-resp .mdict-dict-section.collapsed .mdict-dict-head {
+    border-bottom-color: transparent;
+}
+
+#mdx-resp .mdict-dict-section.collapsed .mdict-dict-toggle {
+    transform: rotate(-90deg);
+}
+
+/* =============================================
+   Dictionary Navigation Bar
+   ============================================= */
+#mdx-resp .mdict-dict-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-left: auto;
+}
+
+#mdx-resp .mdict-dict-nav-pill {
+    padding: 2px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+}
+
+#mdx-resp .mdict-dict-nav-pill:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+    background: rgba(99, 102, 241, 0.1);
+}
+
+#mdx-resp .mdict-dict-nav-pill.active {
+    border-color: var(--primary);
+    color: #c7d2fe;
+    background: rgba(99, 102, 241, 0.22);
+}
+
+/* Expand all / Collapse all button */
+#mdx-resp .mdict-toggle-all {
+    padding: 2px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+    margin-left: 4px;
+}
+
+#mdx-resp .mdict-toggle-all:hover {
+    border-color: var(--accent);
+    color: var(--accent);
 }
 
 /* Empty state */
@@ -381,9 +485,108 @@ kbd {
 }
 
 .empty-state-icon {
-    font-size: 48px;
     margin-bottom: 16px;
     opacity: 0.5;
+}
+
+.empty-state-icon .icon {
+    width: 48px;
+    height: 48px;
+}
+
+/* =============================================
+   Dictionary Filter Panel
+   ============================================= */
+.dict-filter-panel {
+    position: relative;
+    margin-top: 10px;
+    text-align: right;
+}
+
+.dict-filter-toggle {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    border-radius: 999px;
+    padding: 4px 14px;
+    font-size: 0.82rem;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.dict-filter-toggle .icon,
+.history-header .icon {
+    width: 14px;
+    height: 14px;
+    vertical-align: -2px;
+    margin-right: 4px;
+}
+
+.dict-filter-toggle:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+}
+
+.dict-filter-body {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 6px);
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 14px;
+    min-width: 200px;
+    max-width: 320px;
+    max-height: 300px;
+    overflow-y: auto;
+    z-index: 100;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+    text-align: left;
+}
+
+.dict-filter-ctrl {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 8px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+}
+
+.dict-filter-ctrl-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    border-radius: 6px;
+    padding: 2px 10px;
+    font-size: 0.78rem;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.dict-filter-ctrl-btn:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+}
+
+.dict-filter-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    font-size: 0.85rem;
+    color: var(--text);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.dict-filter-item input[type="checkbox"] {
+    accent-color: var(--primary);
+    width: 15px;
+    height: 15px;
+    flex-shrink: 0;
+    cursor: pointer;
 }
 
 /* Footer */
@@ -421,8 +624,33 @@ footer span {
         flex-direction: column;
     }
 
+    #mdx-resp .mdict-dict-head .mdict-dict-toggle {
+        position: absolute;
+        top: 12px;
+        right: 12px;
+    }
+
+    #mdx-resp .mdict-dict-head {
+        position: relative;
+    }
+
     #mdx-resp .mdict-dict-id {
         font-size: 0.72rem;
+    }
+
+    #mdx-resp .mdict-dict-nav {
+        gap: 4px;
+    }
+
+    #mdx-resp .mdict-dict-nav-pill {
+        font-size: 0.72rem;
+        padding: 2px 7px;
+    }
+
+    .dict-filter-body {
+        left: 0;
+        right: 0;
+        max-width: none;
     }
 }
 
