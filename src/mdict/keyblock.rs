@@ -18,6 +18,7 @@ use nom::{
 use ripemd::{Digest, Ripemd128};
 use std::io::Read;
 use tracing::warn;
+use rayon::prelude::*;
 
 const MAX_KEY_BLOCK_INFO_DSIZE: usize = 64 * 1024 * 1024;
 const MAX_KEY_BLOCK_DSIZE: usize = 256 * 1024 * 1024;
@@ -405,35 +406,59 @@ pub fn parse_key_blocks<'a>(
     key_blocks_size: &Vec<KeyBlockSize>,
 ) -> IResult<&'a [u8], Vec<RecordDeBufOffset>> {
     let (data, buf) = take(key_blocks_len)(data)?;
-    let mut buf = buf;
 
-    let mut key_entries: Vec<RecordDeBufOffset> = vec![];
-
-    for block_size in key_blocks_size.iter() {
-        let (remain, decompressed) = key_block_parser(buf, block_size.csize, block_size.dsize)?;
-        let (unconsumed, mut one_block_entries) = match &header.version {
-            Version::V1 => {
-                parse_block_items_v1(&decompressed[..], &header.encoding).map_err(|_| {
-                    nom::Err::Failure(nom::error::Error::new(buf, nom::error::ErrorKind::Fail))
-                })?
-            }
-            Version::V2 => {
-                parse_block_items_v2(&decompressed[..], &header.encoding).map_err(|_| {
-                    nom::Err::Failure(nom::error::Error::new(buf, nom::error::ErrorKind::Fail))
-                })?
-            }
-        };
-        if !unconsumed.is_empty() {
-            warn!(
-                "key block items parser left {} bytes unconsumed",
-                unconsumed.len()
-            );
-        }
-
-        buf = remain;
-        key_entries.append(&mut one_block_entries);
+    // Key blocks are independent: each carries its own csize/dsize. Precompute
+    // every block's byte range so we can decompress and parse them in parallel;
+    // rayon preserves order, so flattening keeps entries in original block order.
+    let mut offsets: Vec<usize> = Vec::with_capacity(key_blocks_size.len());
+    let mut acc: usize = 0;
+    for bs in key_blocks_size {
+        offsets.push(acc);
+        acc = acc.checked_add(bs.csize).unwrap_or(acc);
     }
 
+    let per_block: Vec<Vec<RecordDeBufOffset>> = (0..key_blocks_size.len())
+        .into_par_iter()
+        .map(|i| -> Result<Vec<RecordDeBufOffset>, nom::Err<nom::error::Error<&'a [u8]>>> {
+            let bs = &key_blocks_size[i];
+            let start = offsets[i];
+            let block_end = start.checked_add(bs.csize).ok_or_else(|| {
+                nom::Err::Failure(nom::error::Error::new(
+                    buf,
+                    nom::error::ErrorKind::LengthValue,
+                ))
+            })?;
+            if block_end > buf.len() {
+                return Err(nom::Err::Failure(nom::error::Error::new(
+                    buf,
+                    nom::error::ErrorKind::Eof,
+                )));
+            }
+            let block_buf = &buf[start..block_end];
+            let (_, decompressed) = key_block_parser(block_buf, bs.csize, bs.dsize)?;
+            let (unconsumed, one_block_entries) = match &header.version {
+                Version::V1 => {
+                    parse_block_items_v1(&decompressed[..], &header.encoding).map_err(|_| {
+                        nom::Err::Failure(nom::error::Error::new(block_buf, nom::error::ErrorKind::Fail))
+                    })?
+                }
+                Version::V2 => {
+                    parse_block_items_v2(&decompressed[..], &header.encoding).map_err(|_| {
+                        nom::Err::Failure(nom::error::Error::new(block_buf, nom::error::ErrorKind::Fail))
+                    })?
+                }
+            };
+            if !unconsumed.is_empty() {
+                warn!(
+                    "key block items parser left {} bytes unconsumed",
+                    unconsumed.len()
+                );
+            }
+            Ok(one_block_entries)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let key_entries: Vec<RecordDeBufOffset> = per_block.into_iter().flatten().collect();
     Ok((data, key_entries))
 }
 
@@ -449,10 +474,10 @@ fn parse_block_items_v1<'a>(
         encoding
     };
 
+    let decoder = encoding_from_whatwg_label(actual_encoding).unwrap_or(UTF_8);
     let (remain, entries) = many0(map(
         (be_u32, take_till(|x| x == 0), take(1_usize)),
-        |(offset, buf, _)| {
-            let decoder = encoding_from_whatwg_label(actual_encoding).unwrap_or(UTF_8);
+        move |(offset, buf, _)| {
             let text = decoder
                 .decode(buf, encoding::DecoderTrap::Ignore)
                 .unwrap_or_default();
@@ -535,10 +560,10 @@ fn parse_block_items_v2<'a>(
         Ok((remaining, entries))
     } else {
         // UTF-8 等单字节 null terminator 的编码
+        let decoder = encoding_from_whatwg_label(actual_encoding).unwrap_or(UTF_8);
         let (remain, sep) = many0(map(
             (be_u64, take_till(|x| x == 0), take(1_usize)),
-            |(offset, buf, _end_zero)| {
-                let decoder = encoding_from_whatwg_label(actual_encoding).unwrap_or(UTF_8);
+            move |(offset, buf, _end_zero)| {
                 let text = decoder
                     .decode(buf, encoding::DecoderTrap::Ignore)
                     .unwrap_or_default();
@@ -581,13 +606,14 @@ fn key_block_parser<'a>(input: &'a [u8], csize: usize, dsize: usize) -> IResult<
     let enc_method = (enc >> 4) & 0xf;
     let comp_method = enc & 0xf;
 
-    let mut md = Ripemd128::new();
-    md.update(checksum);
-    let key = md.finalize();
-
     let data: Vec<u8> = match enc_method {
         0 => encrypted_buf.to_vec(),
-        1 => fast_decrypt(encrypted_buf, key.as_slice()),
+        1 => {
+            let mut md = Ripemd128::new();
+            md.update(checksum);
+            let key = md.finalize();
+            fast_decrypt(encrypted_buf, key.as_slice())
+        }
         2 => {
             return Err(nom::Err::Failure(nom::error::Error::new(
                 input,
@@ -605,9 +631,7 @@ fn key_block_parser<'a>(input: &'a [u8], csize: usize, dsize: usize) -> IResult<
     let decompressed = match comp_method {
         0 => data,
         1 => {
-            let lzo = minilzo_rs::LZO::init().map_err(|_| {
-                nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
-            })?;
+            let lzo = crate::util::lzo_instance();
             lzo.decompress(&data[..], dsize).map_err(|_| {
                 nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
             })?
@@ -639,7 +663,7 @@ fn zlib_decompress_checked<'a>(
         .ok()
         .and_then(|v| v.checked_add(1))
         .unwrap_or(u64::MAX);
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(expected_size);
     let mut decoder = ZlibDecoder::new(compressed).take(limit);
     decoder.read_to_end(&mut out).map_err(|_| {
         nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Fail))

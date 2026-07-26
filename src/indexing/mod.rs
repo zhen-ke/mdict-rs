@@ -29,13 +29,15 @@ pub(crate) fn db_path(dict_file: &Path) -> PathBuf {
 
 /// indexing all mdx files into db
 pub(crate) fn indexing(files: &[PathBuf], reindex: bool) -> anyhow::Result<()> {
-    let mut failures: Vec<(PathBuf, anyhow::Error)> = Vec::new();
+    use rayon::prelude::*;
 
-    for file in files {
-        if let Err(e) = ensure_index(file, reindex) {
-            failures.push((file.clone(), e));
-        }
-    }
+    let failures: Vec<(PathBuf, anyhow::Error)> = files
+        .par_iter()
+        .filter_map(|file| match ensure_index(file, reindex) {
+            Ok(()) => None,
+            Err(e) => Some((file.clone(), e)),
+        })
+        .collect();
 
     if failures.is_empty() {
         Ok(())

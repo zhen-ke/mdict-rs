@@ -139,13 +139,14 @@ pub(crate) fn record_block_parser<'a>(
         let enc_method = (enc >> 4) & 0xf;
         let comp_method = enc & 0xf;
 
-        let mut md = Ripemd128::new();
-        md.update(checksum);
-        let key = md.finalize();
-
         let data: Vec<u8> = match enc_method {
             0 => Vec::from(encrypted),
-            1 => fast_decrypt(encrypted, key.as_slice()),
+            1 => {
+                let mut md = Ripemd128::new();
+                md.update(checksum);
+                let key = md.finalize();
+                fast_decrypt(encrypted, key.as_slice())
+            }
             2 => {
                 tracing::error!("unsupported enc method: {enc_method}");
                 return Err(nom::Err::Failure(nom::error::Error::new(
@@ -165,10 +166,7 @@ pub(crate) fn record_block_parser<'a>(
         let decompressed = match comp_method {
             0 => data,
             1 => {
-                let lzo = minilzo_rs::LZO::init().map_err(|e| {
-                    tracing::error!("LZO init failed: {:?}", e);
-                    nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
-                })?;
+                let lzo = crate::util::lzo_instance();
                 lzo.decompress(&data[..], dsize).map_err(|e| {
                     tracing::error!("lzo decompress failed: {:?}", e);
                     nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
@@ -179,7 +177,7 @@ pub(crate) fn record_block_parser<'a>(
                     .ok()
                     .and_then(|v| v.checked_add(1))
                     .unwrap_or(u64::MAX);
-                let mut v = Vec::new();
+                let mut v = Vec::with_capacity(dsize);
                 let mut decoder = ZlibDecoder::new(&data[..]).take(limit);
                 decoder.read_to_end(&mut v).map_err(|e| {
                     tracing::error!("zlib decompress failed: {:?}", e);

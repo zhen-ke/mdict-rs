@@ -1,5 +1,19 @@
+use std::sync::OnceLock;
+
 use nom::IResult;
 use nom::number::complete::{be_u8, be_u16};
+
+/// Process-wide LZO instance, initialized once and reused.
+///
+/// `LZO::init()` runs the C-level `lzo_init()` and allocates a 128 KiB work
+/// memory buffer. Calling it per block wastes both. Decompression does not
+/// touch the work memory (minilzo passes a null pointer), so a single shared
+/// `&'static LZO` is safe across threads.
+static LZO: OnceLock<minilzo_rs::LZO> = OnceLock::new();
+
+pub(crate) fn lzo_instance() -> &'static minilzo_rs::LZO {
+    LZO.get_or_init(|| minilzo_rs::LZO::init().expect("minilzo LZO init failed"))
+}
 
 // 解压缩这个地方优化一下
 pub fn fast_decrypt(encrypted: &[u8], key: &[u8]) -> Vec<u8> {
