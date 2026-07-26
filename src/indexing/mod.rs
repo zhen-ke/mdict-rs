@@ -76,12 +76,25 @@ pub(crate) fn ensure_index(file: &Path, reindex: bool) -> anyhow::Result<()> {
                 "Rebuilding index for {:?}, old db removed: {:?}",
                 file, db_path
             );
+            let start = std::time::Instant::now();
             mdx_to_sqlite(file)?;
+            tracing::info!(
+                "Index built for {:?} in {:.2}s",
+                file,
+                start.elapsed().as_secs_f64()
+            );
         }
         return Ok(());
     }
 
-    mdx_to_sqlite(file)
+    let start = std::time::Instant::now();
+    mdx_to_sqlite(file)?;
+    tracing::info!(
+        "Index built for {:?} in {:.2}s",
+        file,
+        start.elapsed().as_secs_f64()
+    );
+    Ok(())
 }
 
 pub(crate) fn index_status(file: &Path) -> anyhow::Result<IndexStatus> {
@@ -108,13 +121,21 @@ pub(crate) fn index_status(file: &Path) -> anyhow::Result<IndexStatus> {
 pub(crate) fn mdx_to_sqlite(file: &Path) -> anyhow::Result<()> {
     let db_file = db_path(file);
     let mut conn = Connection::open(&db_file)?;
-    // Enable WAL mode during index build.
+    // Tune SQLite for a bulk index build.
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "busy_timeout", "5000")?;
+    // Larger page cache + temp-in-memory speeds up the sort/build phase.
+    conn.pragma_update(None, "cache_size", "-200000")?; // ~200 MiB
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
     let mmap = unsafe { MmapOptions::new().map(&fs::File::open(file)?)? };
     let mdx = Mdx::new(&mmap)?;
 
+    // Schema: create the *data* tables first (MDX_INDEX, MDX_META, MDX_FTS),
+    // but deliberately defer the B-tree indexes (idx_mdx_text,
+    // idx_mdx_text_nocase) until AFTER all rows are inserted. Building an
+    // index in one pass over pre-sorted rowids is far cheaper than updating
+    // the index B-tree on every single INSERT.
     conn.execute(
         "create table if not exists MDX_INDEX (
                 id integer primary key,
@@ -128,16 +149,6 @@ pub(crate) fn mdx_to_sqlite(file: &Path) -> anyhow::Result<()> {
         params![],
     )
     .with_context(|| "create table failed")?;
-    conn.execute(
-        "create index if not exists idx_mdx_text on MDX_INDEX(text)",
-        params![],
-    )
-    .with_context(|| "create index failed")?;
-    conn.execute(
-        "create index if not exists idx_mdx_text_nocase on MDX_INDEX(text COLLATE NOCASE)",
-        params![],
-    )
-    .with_context(|| "create index failed")?;
     conn.execute(
         "create table if not exists MDX_META (
             key text primary key not null,
@@ -226,6 +237,25 @@ pub(crate) fn mdx_to_sqlite(file: &Path) -> anyhow::Result<()> {
         }
     }
     tx.commit().with_context(|| "transaction commit error")?;
+
+    // Now that all rows are in MDX_INDEX, build the lookup indexes in one pass.
+    // This is dramatically faster than maintaining them during INSERT (no
+    // per-row B-tree page splits / random I/O).
+    conn.execute(
+        "create index if not exists idx_mdx_text on MDX_INDEX(text)",
+        params![],
+    )
+    .with_context(|| "create idx_mdx_text failed")?;
+    conn.execute(
+        "create index if not exists idx_mdx_text_nocase on MDX_INDEX(text COLLATE NOCASE)",
+        params![],
+    )
+    .with_context(|| "create idx_mdx_text_nocase failed")?;
+    // FTS5 incremental merge can leave a large pending segment; force it to
+    // flush + optimize now so the first query doesn't pay the merge cost.
+    if fts_enabled {
+        let _ = conn.execute("insert into MDX_FTS(MDX_FTS) values('optimize')", params![]);
+    }
     write_index_meta(&conn, file)?;
     Ok(())
 }

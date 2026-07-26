@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use axum::body::Bytes;
+use rayon::prelude::*;
 use rusqlite::{Connection, named_params};
 use tracing::{debug, info, warn};
 
@@ -86,11 +87,7 @@ fn filter_dict_files<'a>(
         None => files.iter().collect(),
         Some(allowed) => files
             .iter()
-            .filter(|f| {
-                state
-                    .get_dict_id(f)
-                    .is_some_and(|id| allowed.contains(&id))
-            })
+            .filter(|f| state.get_dict_id(f).is_some_and(|id| allowed.contains(&id)))
             .collect(),
     }
 }
@@ -268,37 +265,49 @@ fn query_aggregate_entries(
     word: &str,
     filter: &DictFilter,
 ) -> Result<(Bytes, String), QueryError> {
-    let mut sections = Vec::new();
+    // Collect (file, dict_id) pairs up front so we can fan out the per-dict
+    // lookups in parallel. Each lookup is independent: it takes its own pooled
+    // SQLite connection and mmap reader, follows @@@LINK redirects within
+    // the same file, and produces a single HTML body. rayon preserves input
+    // order, so the rendered sections stay in scan order.
+    let tasks: Vec<(&PathBuf, String)> = filter_dict_files(state.dict_text_files(), state, filter)
+        .into_iter()
+        .filter_map(|file| state.get_dict_id(file).map(|id| (file, id)))
+        .collect();
 
-    for file in filter_dict_files(state.dict_text_files(), state, filter) {
-        let Some(dict_id) = state.get_dict_id(file) else {
-            continue;
-        };
-
-        match query_specific_entry(state, file, word, &dict_id) {
-            Ok(Some((data, _))) => {
-                let body = match std::str::from_utf8(&data) {
-                    Ok(text) => text.to_owned(),
-                    Err(_) => String::from_utf8_lossy(&data).into_owned(),
-                };
-                let title = state.get_dict_display_name(file);
-                let container_class = state.get_dict_container_class(file);
-                sections.push(AggregateSection {
-                    dict_id,
-                    title,
-                    container_class,
-                    body,
-                });
-            }
-            Ok(None) => {}
-            Err(e) => {
-                warn!(
-                    "dict entry query failed for {:?}, word '{}': {}",
-                    file, word, e
-                );
-            }
-        }
+    if tasks.is_empty() {
+        return Err(QueryError::NotFound);
     }
+
+    let sections: Vec<AggregateSection> = tasks
+        .par_iter()
+        .filter_map(
+            |&(file, ref dict_id)| match query_specific_entry(state, file, word, dict_id) {
+                Ok(Some((data, _))) => {
+                    let body = match std::str::from_utf8(&data) {
+                        Ok(text) => text.to_owned(),
+                        Err(_) => String::from_utf8_lossy(&data).into_owned(),
+                    };
+                    let title = state.get_dict_display_name(file);
+                    let container_class = state.get_dict_container_class(file);
+                    Some(AggregateSection {
+                        dict_id: dict_id.clone(),
+                        title,
+                        container_class,
+                        body,
+                    })
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    warn!(
+                        "dict entry query failed for {:?}, word '{}': {}",
+                        file, word, e
+                    );
+                    None
+                }
+            },
+        )
+        .collect();
 
     if sections.is_empty() {
         return Err(QueryError::NotFound);

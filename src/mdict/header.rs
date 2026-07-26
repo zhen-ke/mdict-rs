@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use adler32::adler32;
 use anyhow::{Context, bail};
@@ -29,6 +30,12 @@ pub struct Header {
     pub encoding: String,
 }
 
+/// Compiled once on first use; shared across all header parses (each MDX/MDD
+/// file parse used to recompile this regex, which is wasteful under parallel
+/// indexing with rayon).
+static HEADER_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(\w+)="((.|\r\n|[\r\n])*?)""#).expect("header regex"));
+
 /// Parse header using nom, but return anyhow::Result for better error handling
 pub fn parse_header(data: &[u8]) -> anyhow::Result<(&[u8], Header)> {
     // Use nom to parse length-prefixed data
@@ -54,9 +61,8 @@ pub fn parse_header(data: &[u8]) -> anyhow::Result<(&[u8], Header)> {
         .map_err(|e| anyhow::anyhow!("Failed to decode header as UTF-16LE: {}", e))?;
 
     // Parse header attributes
-    let re = Regex::new(r#"(\w+)="((.|\r\n|[\r\n])*?)""#).context("Failed to compile regex")?;
     let mut attrs = HashMap::new();
-    for cap in re.captures_iter(info.as_str()) {
+    for cap in HEADER_REGEX.captures_iter(info.as_str()) {
         attrs.insert(cap[1].to_ascii_lowercase(), cap[2].to_string());
     }
 

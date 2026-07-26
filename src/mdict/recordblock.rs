@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io::Read;
 
 use flate2::read::ZlibDecoder;
@@ -139,13 +140,15 @@ pub(crate) fn record_block_parser<'a>(
         let enc_method = (enc >> 4) & 0xf;
         let comp_method = enc & 0xf;
 
-        let data: Vec<u8> = match enc_method {
-            0 => Vec::from(encrypted),
+        let data: Cow<[u8]> = match enc_method {
+            // No encryption: borrow the mmap slice directly so we can feed it
+            // to the decompressor without an intermediate copy.
+            0 => Cow::Borrowed(encrypted),
             1 => {
                 let mut md = Ripemd128::new();
                 md.update(checksum);
                 let key = md.finalize();
-                fast_decrypt(encrypted, key.as_slice())
+                Cow::Owned(fast_decrypt(encrypted, key.as_slice()))
             }
             2 => {
                 tracing::error!("unsupported enc method: {enc_method}");
@@ -164,7 +167,7 @@ pub(crate) fn record_block_parser<'a>(
         };
 
         let decompressed = match comp_method {
-            0 => data,
+            0 => data.into_owned(),
             1 => {
                 let lzo = crate::util::lzo_instance();
                 lzo.decompress(&data[..], dsize).map_err(|e| {

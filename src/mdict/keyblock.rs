@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::mdict::header::{Header, Version};
 use crate::util::fast_decrypt;
 use crate::util::text_len_parser_v1;
@@ -15,10 +17,10 @@ use nom::{
     multi::{length_data, many0},
     number::complete::{be_u32, be_u64},
 };
+use rayon::prelude::*;
 use ripemd::{Digest, Ripemd128};
 use std::io::Read;
 use tracing::warn;
-use rayon::prelude::*;
 
 const MAX_KEY_BLOCK_INFO_DSIZE: usize = 64 * 1024 * 1024;
 const MAX_KEY_BLOCK_DSIZE: usize = 256 * 1024 * 1024;
@@ -419,43 +421,49 @@ pub fn parse_key_blocks<'a>(
 
     let per_block: Vec<Vec<RecordDeBufOffset>> = (0..key_blocks_size.len())
         .into_par_iter()
-        .map(|i| -> Result<Vec<RecordDeBufOffset>, nom::Err<nom::error::Error<&'a [u8]>>> {
-            let bs = &key_blocks_size[i];
-            let start = offsets[i];
-            let block_end = start.checked_add(bs.csize).ok_or_else(|| {
-                nom::Err::Failure(nom::error::Error::new(
-                    buf,
-                    nom::error::ErrorKind::LengthValue,
-                ))
-            })?;
-            if block_end > buf.len() {
-                return Err(nom::Err::Failure(nom::error::Error::new(
-                    buf,
-                    nom::error::ErrorKind::Eof,
-                )));
-            }
-            let block_buf = &buf[start..block_end];
-            let (_, decompressed) = key_block_parser(block_buf, bs.csize, bs.dsize)?;
-            let (unconsumed, one_block_entries) = match &header.version {
-                Version::V1 => {
-                    parse_block_items_v1(&decompressed[..], &header.encoding).map_err(|_| {
-                        nom::Err::Failure(nom::error::Error::new(block_buf, nom::error::ErrorKind::Fail))
-                    })?
+        .map(
+            |i| -> Result<Vec<RecordDeBufOffset>, nom::Err<nom::error::Error<&'a [u8]>>> {
+                let bs = &key_blocks_size[i];
+                let start = offsets[i];
+                let block_end = start.checked_add(bs.csize).ok_or_else(|| {
+                    nom::Err::Failure(nom::error::Error::new(
+                        buf,
+                        nom::error::ErrorKind::LengthValue,
+                    ))
+                })?;
+                if block_end > buf.len() {
+                    return Err(nom::Err::Failure(nom::error::Error::new(
+                        buf,
+                        nom::error::ErrorKind::Eof,
+                    )));
                 }
-                Version::V2 => {
-                    parse_block_items_v2(&decompressed[..], &header.encoding).map_err(|_| {
-                        nom::Err::Failure(nom::error::Error::new(block_buf, nom::error::ErrorKind::Fail))
-                    })?
+                let block_buf = &buf[start..block_end];
+                let (_, decompressed) = key_block_parser(block_buf, bs.csize, bs.dsize)?;
+                let (unconsumed, one_block_entries) = match &header.version {
+                    Version::V1 => parse_block_items_v1(&decompressed[..], &header.encoding)
+                        .map_err(|_| {
+                            nom::Err::Failure(nom::error::Error::new(
+                                block_buf,
+                                nom::error::ErrorKind::Fail,
+                            ))
+                        })?,
+                    Version::V2 => parse_block_items_v2(&decompressed[..], &header.encoding)
+                        .map_err(|_| {
+                            nom::Err::Failure(nom::error::Error::new(
+                                block_buf,
+                                nom::error::ErrorKind::Fail,
+                            ))
+                        })?,
+                };
+                if !unconsumed.is_empty() {
+                    warn!(
+                        "key block items parser left {} bytes unconsumed",
+                        unconsumed.len()
+                    );
                 }
-            };
-            if !unconsumed.is_empty() {
-                warn!(
-                    "key block items parser left {} bytes unconsumed",
-                    unconsumed.len()
-                );
-            }
-            Ok(one_block_entries)
-        })
+                Ok(one_block_entries)
+            },
+        )
         .collect::<Result<Vec<_>, _>>()?;
 
     let key_entries: Vec<RecordDeBufOffset> = per_block.into_iter().flatten().collect();
@@ -475,12 +483,11 @@ fn parse_block_items_v1<'a>(
     };
 
     let decoder = encoding_from_whatwg_label(actual_encoding).unwrap_or(UTF_8);
+    let is_utf8 = is_utf8_label(actual_encoding);
     let (remain, entries) = many0(map(
         (be_u32, take_till(|x| x == 0), take(1_usize)),
         move |(offset, buf, _)| {
-            let text = decoder
-                .decode(buf, encoding::DecoderTrap::Ignore)
-                .unwrap_or_default();
+            let text = decode_entry_text(buf, decoder, is_utf8);
             RecordDeBufOffset {
                 record_offset_in_debuf: offset as usize,
                 text,
@@ -561,12 +568,11 @@ fn parse_block_items_v2<'a>(
     } else {
         // UTF-8 等单字节 null terminator 的编码
         let decoder = encoding_from_whatwg_label(actual_encoding).unwrap_or(UTF_8);
+        let is_utf8 = is_utf8_label(actual_encoding);
         let (remain, sep) = many0(map(
             (be_u64, take_till(|x| x == 0), take(1_usize)),
             move |(offset, buf, _end_zero)| {
-                let text = decoder
-                    .decode(buf, encoding::DecoderTrap::Ignore)
-                    .unwrap_or_default();
+                let text = decode_entry_text(buf, decoder, is_utf8);
                 RecordDeBufOffset {
                     record_offset_in_debuf: offset as usize,
                     text,
@@ -576,6 +582,30 @@ fn parse_block_items_v2<'a>(
         .parse(data)?;
 
         Ok((remain, sep))
+    }
+}
+
+/// Fast UTF-8 detection: the `encoding` crate label is case-insensitive and
+/// tolerates aliases, so we just check the common labels directly.
+fn is_utf8_label(label: &str) -> bool {
+    let lower = label.to_ascii_lowercase();
+    lower == "utf-8" || lower == "utf8" || lower == "utf-8bom"
+}
+
+/// Decode a single entry's key text. For the overwhelmingly common UTF-8
+/// case we use `std::str::from_utf8` which skips the `encoding` crate's
+/// trait-object + DecoderTrap dispatch and validates in-place.
+fn decode_entry_text(buf: &[u8], decoder: &'static dyn Encoding, is_utf8: bool) -> String {
+    if is_utf8 {
+        match std::str::from_utf8(buf) {
+            Ok(s) => s.to_owned(),
+            // Fall back to lossy for invalid byte sequences.
+            Err(_) => String::from_utf8_lossy(buf).into_owned(),
+        }
+    } else {
+        decoder
+            .decode(buf, encoding::DecoderTrap::Ignore)
+            .unwrap_or_default()
     }
 }
 
@@ -606,13 +636,15 @@ fn key_block_parser<'a>(input: &'a [u8], csize: usize, dsize: usize) -> IResult<
     let enc_method = (enc >> 4) & 0xf;
     let comp_method = enc & 0xf;
 
-    let data: Vec<u8> = match enc_method {
-        0 => encrypted_buf.to_vec(),
+    let data: Cow<[u8]> = match enc_method {
+        // No encryption: borrow the mmap slice directly so we can feed it
+        // to the decompressor without an intermediate copy.
+        0 => Cow::Borrowed(encrypted_buf),
         1 => {
             let mut md = Ripemd128::new();
             md.update(checksum);
             let key = md.finalize();
-            fast_decrypt(encrypted_buf, key.as_slice())
+            Cow::Owned(fast_decrypt(encrypted_buf, key.as_slice()))
         }
         2 => {
             return Err(nom::Err::Failure(nom::error::Error::new(
@@ -629,7 +661,7 @@ fn key_block_parser<'a>(input: &'a [u8], csize: usize, dsize: usize) -> IResult<
     };
 
     let decompressed = match comp_method {
-        0 => data,
+        0 => data.into_owned(),
         1 => {
             let lzo = crate::util::lzo_instance();
             lzo.decompress(&data[..], dsize).map_err(|_| {

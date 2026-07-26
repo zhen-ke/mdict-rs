@@ -50,7 +50,11 @@ pub struct QueryForm {
 /// Returns `None` (= all dicts) when the input is absent or empty.
 fn parse_dict_filter(raw: &Option<String>) -> DictFilter {
     let Some(s) = raw else { return None };
-    let ids: HashSet<String> = s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
+    let ids: HashSet<String> = s
+        .split(',')
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
     if ids.is_empty() { None } else { Some(ids) }
 }
 
