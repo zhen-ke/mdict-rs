@@ -1,0 +1,203 @@
+mdict-rs architecture and interaction review
+
+Overall conclusion
+- This project is a good pragmatic local-first solution, but not the optimal architecture or interaction design if the goal is a robust, productized dictionary platform.
+- Architecture judgment: good for a small-to-medium offline personal dictionary server; not ideal for long-term complexity growth.
+- Interaction judgment: usable and already better than a bare demo, but not near the UX ceiling.
+
+Project architecture map
+1. Entry/runtime
+- src/main.rs starts an Axum server on port 8181.
+- On startup it discovers dictionary files, resolves static assets, and triggers background index creation.
+- AppState is the central shared runtime object.
+
+2. Core modules
+- src/config/: dictionary directory discovery, static path discovery, per-dictionary TOML config.
+- src/mdict/: low-level MDX/MDD parsing, record/block decoding, mmap-backed reader.
+- src/indexing/: build and validate SQLite index files next to .mdx/.mdd files.
+- src/query/: query normalization, lookup, redirect handling, HTML rewriting, aggregate presentation, suggestions.
+- src/handlers/: HTTP endpoints and response building.
+- src/app_state.rs: catalog, DB pools, mdx readers, cache, throttling semaphore.
+- resources/static/: browser UI (HTML/CSS/JS).
+
+3. Main request flow
+- /query -> handle_query -> query_aggregate_cached -> spawn_blocking_query -> query_aggregate
+- query_aggregate loops all text dictionaries and calls query_specific_entry
+- query_specific_entry / lookup_entry_candidate / lookup_record_in_file use SQLite to locate record metadata, then MdxReader reads and decompresses the record from the source file
+- HTML payload is rewritten so entry/resource/audio links become server routes
+- presenter renders one aggregate HTML page containing all matched dictionaries
+
+4. Resource flow
+- /dict/{id}/res/{path} and /dict/{id}/audio/{path}
+- fallback static resource serving plus dictionary package resource lookup
+- binary responses support cache headers and byte-range handling
+
+5. State/runtime flow
+- AppState builds a catalog of dict ids, primary text files, companion resource files, and configs
+- SQLite connections are lazily pooled
+- MdxReader instances are lazily created and retained
+- entry/resource/negative caches reduce repeated work
+- a semaphore caps blocking query concurrency
+
+What is already strong
+1. Good local-first technical choices
+- MDX content is not copied into an always-hot service store; record bodies are read on demand from mmap-backed source files.
+- SQLite is used as an index rather than as the primary content store. That is a strong tradeoff for offline dictionary lookup.
+- FTS is optional per dictionary, which keeps compatibility and lets users trade indexing cost for speed.
+
+2. Query pipeline is practical
+- exact match first, case-insensitive fallback
+- redirect chain handling for @@@LINK
+- per-dictionary entry routing and resource routing are clean ideas
+- resource/audio separation is more correct than treating every href/src uniformly
+
+3. Runtime protection is decent
+- lazy pool creation
+- lazy reader creation
+- LRU + TTL caches
+- overload protection with semaphore
+- range requests and ETag support for media/static resources
+
+4. Extensibility is better than the repo size suggests
+- per-dictionary TOML config for metadata/CSS/JS/FTS toggle is a useful extension seam
+- aggregate presenter already enables multi-dictionary composition
+
+Main architectural weaknesses
+1. AppState is too large and too central
+- src/app_state.rs mixes catalog responsibilities, runtime dependency container behavior, connection pools, reader lifecycle, cache policy, and concurrency control.
+- This works now, but it is the classic growth bottleneck: every new feature tends to enter AppState.
+- Better direction: separate Catalog, QueryRuntime, CacheLayer, ReaderRegistry, and ConfigResolver.
+
+2. Query layer mixes domain logic and presentation concerns
+- src/query/service.rs orchestrates lookup, redirect handling, aggregation, and output shaping.
+- src/query/presenter.rs returns HTML directly, so the backend is tightly coupled to the current web UI shape.
+- This reduces reuse for future API clients, alternate UIs, or richer response formats.
+
+3. Startup/indexing model is pragmatic but not optimal UX-wise
+- src/main.rs starts background indexing instead of giving an explicit indexing phase.
+- This avoids blocking startup, but creates a poor first-run state: the UI can be available before dictionaries are queryable.
+- Users may see “not found” or partial availability without understanding that indexing is still running.
+
+4. Blocking-query strategy is safe, but not the cleanest long-term model
+- The project uses spawn_blocking around lookup operations because SQLite + mmap/block decode are synchronous.
+- For a local personal server that is acceptable.
+- For more dictionaries, more concurrent users, or more expensive transforms, the current per-request loop across dictionaries can become the main scalability limit.
+
+5. Some repo/documentation consistency is weak
+- README and index.html still contain wording like “Rust + Sled”, but the code clearly uses SQLite.
+- screenshot.png also appears out of date compared with the current static UI code.
+- These mismatches hurt maintainability and user trust more than they seem.
+
+Is the interaction design the optimal solution?
+Short answer: no, but it is serviceable.
+
+Why it is not optimal
+1. The UI is still essentially a single-page demo shell
+- one search box
+- one result region
+- suggestions/history/share sprinkled into a single script
+- limited explicit state communication
+- no real information architecture for multi-dictionary control
+
+2. First-run/onboarding is not optimal
+- If mdict/ is missing or empty, the server logs useful guidance, but the browser UI does not appear to expose setup guidance clearly.
+- A product-grade UX would show a setup page with the resolved dictionary folder, current scan result, supported file types, and next steps.
+
+3. Indexing state is not surfaced to the user
+- There is an API for index status, but the UI does not seem to make indexing progress/status a primary interaction element.
+- This is the biggest UX gap in the whole product.
+
+4. Multi-dictionary reading is still passive rather than interactive
+- Aggregate cards are a good start.
+- But users cannot easily pin a primary dictionary, collapse noisy dictionaries, reorder results, filter by dictionary, or search within one dictionary only from the main flow.
+- For serious dictionary users, those controls matter a lot.
+
+5. Error/empty handling is functional, not excellent
+- Overload, missing entry, indexing not ready, dict missing, and malformed resource are not clearly distinguished in the UI.
+- Some backend errors become generic empty/error states in the frontend.
+
+6. Frontend implementation is becoming hard to evolve
+- resources/static/index.js is a single jQuery-heavy script that owns routing, history, suggestions, query execution, highlighting, audio handling, and click interception.
+- This is okay for a small app, but it is not the optimal maintainable interaction layer.
+
+What the current UX is good at
+- Fast single-word lookup
+- Very low ceremony
+- Shareable URL state
+- Keyboard-first basic use
+- Local/offline deployment model
+
+So the right judgment is:
+- For a personal offline browser dictionary: good enough and reasonably efficient.
+- For a polished product: clearly not the optimal end state.
+
+Priority recommendations
+P0: highest-value changes
+1. Surface indexing/setup state in the UI
+- On load, call /api/index/status and /api/dicts.
+- Show: dictionary count, indexing ready/not ready, FTS enabled/disabled, missing DB, rebuild needed.
+- If no dictionaries are found, replace the empty search experience with a setup screen.
+
+2. Split backend response layers
+- Keep internal lookup logic returning structured data, not only final HTML.
+- Let presentation/HTML rendering be a thin layer on top.
+- This will make future UI/API evolution much easier.
+
+3. Break AppState into narrower services
+- DictCatalog
+- QueryExecutor
+- ReaderRegistry
+- CacheStore
+- IndexStatusService
+- This is the main architecture refactor that will pay off over time.
+
+P1: strong UX improvements
+4. Add dictionary-level controls in the UI
+- enable/disable dictionaries for current query
+- pin preferred dictionary to the top
+- collapse/expand cards
+- “search only in this dictionary” action
+
+5. Show why a query failed
+- not found
+- indexing pending
+- dictionary not loaded
+- service overloaded
+- invalid input
+- These should not all feel the same to the user.
+
+6. Replace the monolithic index.js with modules
+- query state
+- router/url state
+- suggestions/history
+- result rendering
+- media handling
+- Can still stay framework-light; no need to jump to a heavy SPA stack.
+
+P2: polish and scale
+7. Add query cancellation / stale-request protection
+- Suggestions and repeated fast searches can race conceptually.
+- A fetch + AbortController pattern would be cleaner than accumulating jQuery AJAX flows.
+
+8. Add a rebuild/reindex affordance
+- Useful when dictionary files change.
+- Right now the system is intelligent, but not very transparent.
+
+9. Clean up naming and docs consistency
+- replace remaining “Sled” wording
+- refresh screenshots
+- document the actual architecture and first-run behavior
+
+Best-solution judgment by target
+- If target = “single-user local offline MDX server with minimal ops”: the current stack is close to a good practical solution.
+- If target = “easy-to-maintain, polished, extensible dictionary product”: this is not the best solution yet.
+
+My final score
+- Core architecture: 7.5/10
+- Runtime pragmatism: 8/10
+- Long-term maintainability: 6/10
+- Interaction/UX: 6.5/10
+- Product readiness: 6/10
+
+Verification
+- cargo test passed: 20 passed, 0 failed.
