@@ -129,7 +129,21 @@ function enhanceAggregateResult() {
                 .appendTo($nav);
         });
         $meta.append($nav);
-        $meta.append('<button class="mdict-toggle-all" data-action="expand">全部展开</button>');
+
+        // 根据当前折叠状态初始化按钮文字
+        const collapsedCount = $sections.filter('.collapsed').length;
+        const allCollapsed = (collapsedCount === $sections.length);
+        const toggleLabel = allCollapsed ? '全部展开' : '全部折叠';
+        const toggleAction = allCollapsed ? 'expand' : 'collapse';
+        $meta.append('<button class="mdict-toggle-all" data-action="' + toggleAction + '">' + toggleLabel + '</button>');
+    }
+
+    // 3. 首次访问提示（只在第一次加载时显示一次）
+    if (isFirstVisit && $sections.length > 1) {
+        const $hint = $('<div class="mdict-collapse-hint">💡 点击词典标题可展开/折叠</div>');
+        $aggregate.prepend($hint);
+        setTimeout(function () { $hint.addClass('fade-out'); }, 4000);
+        setTimeout(function () { $hint.remove(); }, 4600);
     }
 
     // 3. 启动滚动观察，高亮当前可见词典对应的 nav pill
@@ -285,6 +299,8 @@ function buildDictsParam() {
     if (!enabled || allDicts.length === 0) return '';
     // 全部勾选 → 等同于不筛选
     if (enabled.size >= allDicts.length) return '';
+    // 0 个选中 → 传一个不存在的 ID，让后端返回空
+    if (enabled.size === 0) return '__none__';
     return [...enabled].join(',');
 }
 
@@ -299,7 +315,7 @@ function initDictFilter() {
 
         const enabled = getEnabledDictIds(); // null = 全部启用
         const $panel = $('<div class="dict-filter-panel"></div>');
-        const $toggle = $('<button class="dict-filter-toggle" title="词典筛选"><svg class="icon"><use href="#icon-filter"/></svg> 筛选</button>');
+        const $toggle = $('<button class="dict-filter-toggle" id="dict-filter-btn" title="词典筛选"><svg class="icon"><use href="#icon-filter"/></svg> <span class="dict-filter-label">筛选</span></button>');
         const $body = $('<div class="dict-filter-body" style="display:none"></div>');
 
         // "全选 / 全不选" 控制行
@@ -322,6 +338,9 @@ function initDictFilter() {
         $panel.append($toggle).append($body);
         $('.search-container').append($panel);
 
+        // 初始化筛选按钮状态
+        updateFilterBadge();
+
         // 切换面板显示
         $toggle.on('click', function () {
             $body.slideToggle(150);
@@ -337,6 +356,8 @@ function initDictFilter() {
         // 单个 checkbox 变化
         $body.on('change', 'input[type="checkbox"]', function () {
             syncFilterFromCheckboxes($body);
+            updateFilterBadge();
+            autoRequery();
         });
 
         // 全选 / 全不选
@@ -345,8 +366,42 @@ function initDictFilter() {
             const newState = (action === 'all');
             $body.find('input[type="checkbox"]').prop('checked', newState);
             syncFilterFromCheckboxes($body);
+            updateFilterBadge();
+            autoRequery();
         });
     });
+}
+
+/**
+ * 更新筛选按钮上的数量徽标。
+ * 当有筛选激活时显示 "筛选 3/5" 并添加 active 样式。
+ */
+function updateFilterBadge() {
+    const $btn = $('#dict-filter-btn');
+    if ($btn.length === 0 || allDicts.length === 0) return;
+
+    const enabled = getEnabledDictIds();
+    const $label = $btn.find('.dict-filter-label');
+
+    if (!enabled || enabled.size >= allDicts.length) {
+        // 全选状态
+        $label.text('筛选');
+        $btn.removeClass('dict-filter-active');
+    } else {
+        // 有筛选
+        $label.text('筛选 ' + enabled.size + '/' + allDicts.length);
+        $btn.addClass('dict-filter-active');
+    }
+}
+
+/**
+ * 筛选变更后自动重新查询（如果输入框有内容）。
+ */
+function autoRequery() {
+    const word = $('#word').val().trim();
+    if (word && validInput(word)) {
+        queryMdx(word, false); // false = 不重复添加历史
+    }
 }
 
 /**
@@ -359,10 +414,11 @@ function syncFilterFromCheckboxes($body) {
             checked.push($(this).data('dict-id'));
         }
     });
-    if (checked.length === 0 || checked.length === allDicts.length) {
-        // 全选或全不选 → 存为 null（查所有）
+    if (checked.length === allDicts.length) {
+        // 全选 → 存为 null（查所有）
         saveEnabledDictIds(null);
     } else {
+        // 包括 0 个选中的情况 — 保留空集合，后端会返回空结果
         saveEnabledDictIds(new Set(checked));
     }
 }

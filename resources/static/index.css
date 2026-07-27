@@ -286,6 +286,12 @@ kbd {
     color: var(--text-muted);
     font-size: 0.95rem;
     margin-bottom: 2px;
+    position: sticky;
+    top: 64px;
+    z-index: 40;
+    background: var(--bg-card);
+    padding: 8px 0;
+    border-radius: 8px;
 }
 
 #mdx-resp .mdict-agg-hit {
@@ -394,7 +400,10 @@ kbd {
 
 #mdx-resp .mdict-dict-body {
     padding: 12px 14px;
-    transition: none;
+    max-height: 20000px;
+    overflow: hidden;
+    opacity: 1;
+    transition: max-height 0.35s ease, opacity 0.2s ease, padding 0.25s ease;
 }
 
 /* Collapse/expand toggle arrow */
@@ -413,7 +422,11 @@ kbd {
 
 /* Collapsed state */
 #mdx-resp .mdict-dict-section.collapsed .mdict-dict-body {
-    display: none;
+    max-height: 0;
+    opacity: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    pointer-events: none;
 }
 
 #mdx-resp .mdict-dict-section.collapsed .mdict-dict-head {
@@ -525,6 +538,14 @@ kbd {
 .dict-filter-toggle:hover {
     border-color: var(--primary);
     color: var(--primary);
+}
+
+/* Filter active state — accent glow when filter is applied */
+.dict-filter-toggle.dict-filter-active {
+    border-color: var(--primary);
+    color: var(--primary);
+    background: rgba(99, 102, 241, 0.12);
+    box-shadow: 0 0 8px rgba(99, 102, 241, 0.2);
 }
 
 .dict-filter-body {
@@ -640,11 +661,14 @@ footer span {
 
     #mdx-resp .mdict-dict-nav {
         gap: 4px;
+        overflow-x: auto;
+        flex-wrap: nowrap;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
     }
 
-    #mdx-resp .mdict-dict-nav-pill {
-        font-size: 0.72rem;
-        padding: 2px 7px;
+    #mdx-resp .mdict-dict-nav::-webkit-scrollbar {
+        display: none;
     }
 
     .dict-filter-body {
@@ -892,4 +916,29 @@ footer span {
         left: 0;
         right: 0;
     }
+}
+
+/* =============================================
+   First-visit Collapse Hint
+   ============================================= */
+.mdict-collapse-hint {
+    text-align: center;
+    padding: 8px 16px;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    background: rgba(99, 102, 241, 0.08);
+    border: 1px solid rgba(99, 102, 241, 0.2);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    animation: hintFadeIn 0.4s ease;
+    transition: opacity 0.5s ease;
+}
+
+.mdict-collapse-hint.fade-out {
+    opacity: 0;
+}
+
+@keyframes hintFadeIn {
+    from { opacity: 0; transform: translateY(-8px); }
+    to   { opacity: 1; transform: translateY(0); }
 }
