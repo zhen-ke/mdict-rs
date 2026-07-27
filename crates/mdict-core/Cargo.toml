@@ -23,3 +23,14 @@ regex = "1"
 percent-encoding = "2"
 thiserror = "2"
 tracing = "0.1"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "normalize"
+harness = false
+
+[[bench]]
+name = "query_scan"
+harness = false

@@ -4,7 +4,7 @@ use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
 use memmap2::MmapOptions;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, ToSql, Transaction, params, params_from_iter};
 
 use crate::mdict::mdx::Mdx;
 use tracing::{info, warn};
@@ -207,58 +207,52 @@ pub fn mdx_to_sqlite(file: &Path, fts_enabled: bool) -> anyhow::Result<()> {
         .transaction()
         .with_context(|| "get transaction from connection failed")?;
 
-    {
-        let mut stmt = tx
-            .prepare_cached(
-                "insert into MDX_INDEX(text, normalized, record_offset, record_length, block_offset, block_size, block_dsize) values (?,?,?,?,?,?)",
-            )
-            .with_context(|| "prepare insert statement failed")?;
-        let mut fts_stmt = if fts_enabled {
-            Some(
-                tx.prepare_cached("insert into MDX_FTS(text) values (?)")
-                    .with_context(|| "prepare FTS insert statement failed")?,
-            )
+    // 分块多行批量插入：每块以单条多 VALUES 语句写入，减少 SQLite 调用与解析
+    // 轮次（相对逐行 prepared execute 可量级下降）。块大小受 SQLite 变量数
+    // 上限（旧版 999）制约：100×7=700 < 999，安全。
+    const INSERT_CHUNK: usize = 100;
+    let mut chunk: Vec<(String, Option<String>, i64, i64, i64, i64, i64)> =
+        Vec::with_capacity(INSERT_CHUNK);
+    let mut fts_chunk: Vec<String> = Vec::with_capacity(INSERT_CHUNK);
+
+    for r in mdx.entries() {
+        let record_length = r
+            .record_end_in_de_block
+            .checked_sub(r.record_start_in_de_block)
+            .with_context(|| {
+                format!(
+                    "invalid record range for '{}': {}..{}",
+                    r.text, r.record_start_in_de_block, r.record_end_in_de_block
+                )
+            })?;
+        // 仅对文本词典计算 normalized；资源词典（.mdd）的 text 是路径，
+        // 归一化会破坏路径匹配，故存 NULL。
+        let normalized = if is_text_dict {
+            Some(crate::normalize::canonical_normalize(&r.text))
         } else {
             None
         };
-
-        for r in mdx.entries() {
-            let record_length = r
-                .record_end_in_de_block
-                .checked_sub(r.record_start_in_de_block)
-                .with_context(|| {
-                    format!(
-                        "invalid record range for '{}': {}..{}",
-                        r.text, r.record_start_in_de_block, r.record_end_in_de_block
-                    )
-                })?;
-            // 仅对文本词典计算 normalized；资源词典（.mdd）的 text 是路径，
-            // 归一化会破坏路径匹配，故存 NULL。
-            let normalized = if is_text_dict {
-                Some(crate::normalize::canonical_normalize(&r.text))
-            } else {
-                None
-            };
-            stmt.execute(params![
-                r.text,
-                normalized,
-                r.record_start_in_de_block,
-                record_length,
-                r.block_offset_in_buf,
-                r.block_csize,
-                r.block_dsize
-            ])
-            .with_context(|| "insert MDX_INDEX table error")?;
-
-            if let Some(ref mut fts_stmt) = fts_stmt
-                && should_index_in_fts(&r.text)
-            {
-                fts_stmt
-                    .execute(params![r.text])
-                    .with_context(|| "insert MDX_FTS table error")?;
-            }
+        chunk.push((
+            r.text.clone(),
+            normalized,
+            r.record_start_in_de_block as i64,
+            record_length as i64,
+            r.block_offset_in_buf as i64,
+            r.block_csize as i64,
+            r.block_dsize as i64,
+        ));
+        if fts_enabled && should_index_in_fts(&r.text) {
+            fts_chunk.push(r.text.clone());
+        }
+        if chunk.len() >= INSERT_CHUNK {
+            flush_index_chunk(&tx, &mut chunk)?;
+        }
+        if fts_chunk.len() >= INSERT_CHUNK {
+            flush_fts_chunk(&tx, &mut fts_chunk)?;
         }
     }
+    flush_index_chunk(&tx, &mut chunk)?;
+    flush_fts_chunk(&tx, &mut fts_chunk)?;
     tx.commit().with_context(|| "transaction commit error")?;
 
     // Now that all rows are in MDX_INDEX, build the lookup indexes in one pass.
@@ -287,6 +281,55 @@ pub fn mdx_to_sqlite(file: &Path, fts_enabled: bool) -> anyhow::Result<()> {
         let _ = conn.execute("insert into MDX_FTS(MDX_FTS) values('optimize')", params![]);
     }
     write_index_meta(&conn, file)?;
+    Ok(())
+}
+
+/// 把一chunk（最多 100 行）以单条多 VALUES 语句写入 MDX_INDEX，
+/// 减少 SQLite 调用/解析轮次。块为空时直接返回。
+fn flush_index_chunk(
+    tx: &Transaction,
+    chunk: &mut Vec<(String, Option<String>, i64, i64, i64, i64, i64)>,
+) -> anyhow::Result<()> {
+    if chunk.is_empty() {
+        return Ok(());
+    }
+    let placeholders = (0..chunk.len())
+        .map(|_| "(?,?,?,?,?,?,?)")
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "insert into MDX_INDEX(text, normalized, record_offset, record_length, block_offset, block_size, block_dsize) values {placeholders}"
+    );
+    let mut p: Vec<&dyn ToSql> = Vec::with_capacity(chunk.len() * 7);
+    for (text, normalized, ro, rl, bo, bc, bd) in chunk.iter() {
+        p.push(text);
+        p.push(normalized);
+        p.push(ro);
+        p.push(rl);
+        p.push(bo);
+        p.push(bc);
+        p.push(bd);
+    }
+    tx.execute(&sql, params_from_iter(p))
+        .with_context(|| "insert MDX_INDEX batch error")?;
+    chunk.clear();
+    Ok(())
+}
+
+/// 把一chunk FTS 文本以单条多 VALUES 语句写入 MDX_FTS。块为空时直接返回。
+fn flush_fts_chunk(tx: &Transaction, chunk: &mut Vec<String>) -> anyhow::Result<()> {
+    if chunk.is_empty() {
+        return Ok(());
+    }
+    let placeholders = (0..chunk.len())
+        .map(|_| "(?)")
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!("insert into MDX_FTS(text) values {placeholders}");
+    let p: Vec<&dyn ToSql> = chunk.iter().map(|s| s as &dyn ToSql).collect();
+    tx.execute(&sql, params_from_iter(p))
+        .with_context(|| "insert MDX_FTS batch error")?;
+    chunk.clear();
     Ok(())
 }
 
@@ -395,4 +438,87 @@ fn should_index_in_fts(text: &str) -> bool {
         return false;
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{flush_index_chunk, should_index_in_fts};
+    use rusqlite::Connection;
+
+    fn open_index_db() -> Connection {
+        let conn = Connection::open_in_memory().expect("open sqlite");
+        conn.execute(
+            "create table MDX_INDEX (
+                id integer primary key,
+                text text not null,
+                normalized text,
+                record_offset integer not null,
+                record_length integer not null,
+                block_offset integer not null,
+                block_size integer not null,
+                block_dsize integer not null
+             )",
+            [],
+        )
+        .expect("create MDX_INDEX");
+        conn
+    }
+
+    #[test]
+    fn batch_insert_writes_all_rows_with_correct_normalized() {
+        let mut conn = open_index_db();
+        let tx = conn.transaction().expect("tx");
+        let mut chunk = vec![
+            ("a".to_string(), Some("a".to_string()), 1, 2, 3, 4, 5),
+            ("B".to_string(), Some("b".to_string()), 6, 7, 8, 9, 10),
+            (
+                "café".to_string(),
+                Some("cafe".to_string()),
+                11,
+                12,
+                13,
+                14,
+                15,
+            ),
+        ];
+        flush_index_chunk(&tx, &mut chunk).expect("flush");
+        tx.commit().expect("commit");
+
+        let count: i64 = conn
+            .query_row("select count(*) from MDX_INDEX", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 3);
+
+        let norm: String = conn
+            .query_row(
+                "select normalized from MDX_INDEX where text='café'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("query café");
+        assert_eq!(norm, "cafe");
+        // chunk was drained
+        assert!(chunk.is_empty());
+    }
+
+    #[test]
+    fn flush_index_chunk_noop_on_empty() {
+        let mut conn = open_index_db();
+        let tx = conn.transaction().expect("tx");
+        let mut chunk: Vec<(String, Option<String>, i64, i64, i64, i64, i64)> = vec![];
+        flush_index_chunk(&tx, &mut chunk).expect("flush empty");
+        tx.commit().expect("commit");
+        let count: i64 = conn
+            .query_row("select count(*) from MDX_INDEX", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn fts_filter_rejects_paths_and_digits() {
+        assert!(should_index_in_fts("hello"));
+        assert!(!should_index_in_fts("\\path\\to"));
+        assert!(!should_index_in_fts("12monkeys"));
+        assert!(!should_index_in_fts("a@b"));
+    }
 }
