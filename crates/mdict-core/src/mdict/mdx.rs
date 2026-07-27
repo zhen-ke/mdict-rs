@@ -1,9 +1,9 @@
+use crate::error::MdictError;
 use crate::mdict::header::parse_header;
 use crate::mdict::keyblock::{
     RecordDeBufOffset, parse_key_block_header, parse_key_block_info, parse_key_blocks,
 };
 use crate::mdict::recordblock::{RecordBlockSize, parse_record_blocks};
-use anyhow::{Context, anyhow};
 
 /// 一个record的定位信息：在buf(buf表示所有record_block的bytes)中的offset和在block解压后的offset
 /// draw with: https://asciiflow.com/#/
@@ -75,13 +75,15 @@ impl Mdx {
     /// let data = include_bytes!("/file.mdx");
     /// let mdx = Mdx::new(&data)?;
     /// ```
-    pub fn new(data: &[u8]) -> anyhow::Result<Mdx> {
+    pub fn new(data: &[u8]) -> Result<Mdx, MdictError> {
         let input_len = data.len();
 
-        let (data, header) = parse_header(data).context("Failed to parse MDX header")?;
+        let (data, header) = parse_header(data)
+            .map_err(|e| MdictError::CorruptInput(format!("Failed to parse MDX header: {e}")))?;
 
-        let (data, kbh) = parse_key_block_header(data, &header)
-            .map_err(|e| anyhow::anyhow!("Failed to parse key block header: {:?}", e))?;
+        let (data, kbh) = parse_key_block_header(data, &header).map_err(|e| {
+            MdictError::CorruptInput(format!("Failed to parse key block header: {e:?}"))
+        })?;
 
         let (data, key_blocks_size) = parse_key_block_info(
             data,
@@ -89,20 +91,24 @@ impl Mdx {
             kbh.key_block_info_decompressed_len,
             &header,
         )
-        .map_err(|e| anyhow::anyhow!("Failed to parse key block info: {:?}", e))?;
+        .map_err(|e| MdictError::CorruptInput(format!("Failed to parse key block info: {e:?}")))?;
 
         let (data, mut entries) =
-            parse_key_blocks(data, kbh.key_blocks_len, &header, &key_blocks_size)
-                .map_err(|e| anyhow::anyhow!("Failed to parse key blocks: {:?}", e))?;
+            parse_key_blocks(data, kbh.key_blocks_len, &header, &key_blocks_size).map_err(|e| {
+                MdictError::CorruptInput(format!("Failed to parse key blocks: {e:?}"))
+            })?;
 
-        let (rest, record_blocks_size) = parse_record_blocks(data, &header)
-            .map_err(|e| anyhow::anyhow!("Failed to parse record blocks: {:?}", e))?;
+        let (rest, record_blocks_size) = parse_record_blocks(data, &header).map_err(|e| {
+            MdictError::CorruptInput(format!("Failed to parse record blocks: {e:?}"))
+        })?;
 
         let base_offset = input_len - rest.len();
 
         // 计算position耗时，一次计算就保存下来
         let offset = records_offset(entries.as_mut_slice(), &record_blocks_size, base_offset)
-            .context("Failed to calculate record offsets")?;
+            .map_err(|e| {
+                MdictError::CorruptInput(format!("Failed to calculate record offsets: {e}"))
+            })?;
 
         Ok(Mdx {
             records_offset: offset,
@@ -122,7 +128,7 @@ fn records_offset(
     records_debuf_index: &mut [RecordDeBufOffset],
     record_blocks_size: &[RecordBlockSize],
     base_offset: usize,
-) -> anyhow::Result<Vec<RecordOffsetInfo>> {
+) -> Result<Vec<RecordOffsetInfo>, MdictError> {
     // Pre-allocate capacity for better performance
     let mut positions: Vec<RecordOffsetInfo> = Vec::with_capacity(records_debuf_index.len());
     let mut i: usize = 0;
@@ -137,7 +143,7 @@ fn records_offset(
             let record_offset_in_debuf = record.record_offset_in_debuf;
             let block_end = pre_blocks_dsize_sum
                 .checked_add(block.dsize)
-                .ok_or_else(|| anyhow!("record block end overflow"))?;
+                .ok_or_else(|| MdictError::CorruptInput("record block end overflow".to_string()))?;
 
             // 当前entry已经属于下一个block，注意等于号
             if record_offset_in_debuf >= block_end {
@@ -146,7 +152,9 @@ fn records_offset(
 
             let record_start_in_de_block = record_offset_in_debuf
                 .checked_sub(pre_blocks_dsize_sum)
-                .ok_or_else(|| anyhow!("record start offset underflow"))?;
+                .ok_or_else(|| {
+                    MdictError::CorruptInput("record start offset underflow".to_string())
+                })?;
             let record_end_in_de_block = if i < records_debuf_index.len() - 1 {
                 let next_entry = &records_debuf_index[i + 1];
                 // If the next entry belongs to a later block, clamp to current
@@ -157,7 +165,9 @@ fn records_offset(
                     next_entry
                         .record_offset_in_debuf
                         .checked_sub(pre_blocks_dsize_sum)
-                        .ok_or_else(|| anyhow!("record end offset underflow"))?
+                        .ok_or_else(|| {
+                            MdictError::CorruptInput("record end offset underflow".to_string())
+                        })?
                 }
             } else {
                 // last entry
@@ -166,11 +176,16 @@ fn records_offset(
             if record_end_in_de_block < record_start_in_de_block
                 || record_end_in_de_block > block.dsize
             {
-                return Err(anyhow!("invalid record range in decompressed block"));
+                return Err(MdictError::CorruptInput(
+                    "invalid record range in decompressed block".to_string(),
+                ));
             }
-            let block_offset_in_buf = base_offset
-                .checked_add(pre_blocks_csize_sum)
-                .ok_or_else(|| anyhow!("record block offset overflow"))?;
+            let block_offset_in_buf =
+                base_offset
+                    .checked_add(pre_blocks_csize_sum)
+                    .ok_or_else(|| {
+                        MdictError::CorruptInput("record block offset overflow".to_string())
+                    })?;
 
             positions.push(RecordOffsetInfo {
                 text: std::mem::take(&mut records_debuf_index[i].text),
@@ -184,10 +199,10 @@ fn records_offset(
         }
         pre_blocks_dsize_sum = pre_blocks_dsize_sum
             .checked_add(block.dsize)
-            .ok_or_else(|| anyhow!("accumulate dsize overflow"))?;
+            .ok_or_else(|| MdictError::CorruptInput("accumulate dsize overflow".to_string()))?;
         pre_blocks_csize_sum = pre_blocks_csize_sum
             .checked_add(block.csize)
-            .ok_or_else(|| anyhow!("accumulate csize overflow"))?;
+            .ok_or_else(|| MdictError::CorruptInput("accumulate csize overflow".to_string()))?;
     }
     Ok(positions)
 }

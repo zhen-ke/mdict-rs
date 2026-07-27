@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
+use crate::error::MdictError;
 use adler32::adler32;
-use anyhow::{Context, bail};
 use encoding::{Encoding, all::UTF_16LE};
 use nom::Parser;
 use nom::multi::length_data;
@@ -36,29 +36,32 @@ pub struct Header {
 static HEADER_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(\w+)="((.|\r\n|[\r\n])*?)""#).expect("header regex"));
 
-/// Parse header using nom, but return anyhow::Result for better error handling
-pub fn parse_header(data: &[u8]) -> anyhow::Result<(&[u8], Header)> {
+/// Parse header using nom, return typed [`MdictError`] for human-readable failures.
+pub fn parse_header(data: &[u8]) -> Result<(&[u8], Header), MdictError> {
     // Use nom to parse length-prefixed data
     let (data, (header_buf, checksum)) = (length_data(be_u32), le_u32).parse(data).map_err(
         |e: nom::Err<nom::error::Error<&[u8]>>| {
-            anyhow::anyhow!("Failed to parse header length/checksum: {:?}", e)
+            MdictError::CorruptInput(format!("Failed to parse header length/checksum: {e:?}"))
         },
     )?;
 
     // Verify checksum
-    let computed_checksum = adler32(header_buf).context("Failed to compute adler32 checksum")?;
+    let computed_checksum = adler32(header_buf).map_err(|e| {
+        MdictError::CorruptInput(format!("Failed to compute adler32 checksum: {e}"))
+    })?;
     if computed_checksum != checksum {
-        bail!(
-            "Header checksum mismatch: computed {} != expected {}",
-            computed_checksum,
-            checksum
-        );
+        return Err(MdictError::ChecksumMismatch {
+            context: "header",
+            detail: format!("computed {computed_checksum} != expected {checksum}"),
+        });
     }
 
     // Decode UTF-16LE header content
     let info = UTF_16LE
         .decode(header_buf, encoding::DecoderTrap::Strict)
-        .map_err(|e| anyhow::anyhow!("Failed to decode header as UTF-16LE: {}", e))?;
+        .map_err(|e| {
+            MdictError::CorruptInput(format!("Failed to decode header as UTF-16LE: {e}"))
+        })?;
 
     // Parse header attributes
     let mut attrs = HashMap::new();
@@ -69,32 +72,38 @@ pub fn parse_header(data: &[u8]) -> anyhow::Result<(&[u8], Header)> {
     info!(">>>the header content: {:?}", &attrs);
 
     // Parse version
-    let version_str = attrs
-        .get("generatedbyengineversion")
-        .context("Missing 'GeneratedByEngineVersion' attribute in header")?;
+    let version_str = attrs.get("generatedbyengineversion").ok_or_else(|| {
+        MdictError::CorruptInput(
+            "Missing 'GeneratedByEngineVersion' attribute in header".to_string(),
+        )
+    })?;
 
-    let version_char = version_str
-        .trim()
-        .chars()
-        .next()
-        .context("Empty 'GeneratedByEngineVersion' value")?;
+    let version_char = version_str.trim().chars().next().ok_or_else(|| {
+        MdictError::CorruptInput("Empty 'GeneratedByEngineVersion' value".to_string())
+    })?;
 
-    let version_num = version_char
-        .to_digit(10)
-        .context(format!("Invalid version digit: '{}'", version_char))? as u8;
+    let version_num = version_char.to_digit(10).ok_or_else(|| {
+        MdictError::CorruptInput(format!("Invalid version digit: '{version_char}'"))
+    })? as u8;
 
     let version = match version_num {
         1 => Version::V1,
         2 => Version::V2,
+        // 引擎版本 3+ 的真实 v3 格式（MdxBuilder 4.x）布局完全不同，无法
+        // 用 V2 路径解析；此处保持宽容（按 V2 跑），后续解析处会以
+        // CorruptInput 干净失败，而不是莫名崩溃。
         n if n > 2 => {
-            // Keep parser permissive for newer generator versions that still use V2 layout.
             warn!(
                 "MDX engine version {} detected, treat as V2-compatible parser path",
                 n
             );
             Version::V2
         }
-        _ => bail!("Unsupported MDX engine version: {}", version_num),
+        _ => {
+            return Err(MdictError::UnsupportedVersion {
+                version: version_num,
+            });
+        }
     };
 
     // "0" "2" "3" - MDD 文件也可能没有 Encrypted 属性

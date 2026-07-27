@@ -12,6 +12,7 @@
 //! - [`presenter`]  — 多词典聚合 HTML 渲染与安全清洗
 //! - [`util`]       — 加解密与基础解析工具
 
+pub mod error;
 pub mod indexing;
 pub mod mdict;
 pub mod normalize;
