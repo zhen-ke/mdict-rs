@@ -27,7 +27,7 @@ pub(crate) fn lzo_instance() -> &'static minilzo_rs::LZO {
 pub fn fast_decrypt(encrypted: &[u8], key: &[u8]) -> Vec<u8> {
     let len = encrypted.len();
     let key_len = key.len();
-    debug_assert!(key_len > 0, "fast_decrypt key must not be empty");
+    assert!(key_len > 0, "fast_decrypt key must not be empty");
 
     let mut out = Vec::with_capacity(len);
     if len == 0 {
@@ -54,7 +54,12 @@ pub fn text_len_parser_v2(input: &[u8]) -> IResult<&[u8], u16> {
 pub fn text_len_parser_v2_utf16(input: &[u8]) -> IResult<&[u8], u16> {
     let (input, len) = be_u16(input)?;
     // 字符数 + 1 (null terminator)，然后 * 2 得到字节数
-    Ok((input, (len + 1) * 2))
+    // Use u32 for intermediate calculation to prevent u16 overflow
+    let byte_len = (u32::from(len) + 1) * 2;
+    let byte_len = u16::try_from(byte_len).map_err(|_| {
+        nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+    })?;
+    Ok((input, byte_len))
 }
 
 pub fn text_len_parser_v1(input: &[u8]) -> IResult<&[u8], u8> {

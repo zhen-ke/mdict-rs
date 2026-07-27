@@ -429,8 +429,10 @@ fn calculate_fts_score(prefix: &str, word_lower: &str, word: &str, bm25_score: f
     if word_lower.starts_with(prefix) {
         score += 100;
     }
-    if word.starts_with(&prefix.chars().next().unwrap().to_uppercase().to_string()) {
-        score += 20;
+    if let Some(ch) = prefix.chars().next() {
+        if word.starts_with(&ch.to_uppercase().to_string()) {
+            score += 20;
+        }
     }
 
     score += 50 - word.len().min(50) as i32;

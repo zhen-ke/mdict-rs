@@ -77,7 +77,9 @@ impl DictConfig {
         self.resolve_content(&self.js, dict_dir)
     }
 
-    /// Resolve content that may be inline or a @file reference
+    /// Resolve content that may be inline or a @file reference.
+    /// File references use `@filename` syntax and are restricted to files
+    /// within the dictionary directory to prevent path traversal.
     fn resolve_content(&self, content: &Option<String>, dict_dir: &Path) -> String {
         match content {
             Some(value) => {
@@ -85,9 +87,39 @@ impl DictConfig {
                 if trimmed.starts_with('@') {
                     // File reference: @filename.css
                     let filename = &trimmed[1..];
+
+                    // Reject obviously malicious paths before hitting the filesystem
+                    if filename.contains("..") || filename.starts_with('/') || filename.starts_with('\\') {
+                        warn!("Rejected @file reference with path traversal: {:?}", filename);
+                        return String::new();
+                    }
+
                     let file_path = dict_dir.join(filename);
 
-                    match fs::read_to_string(&file_path) {
+                    // Canonicalize and verify the resolved path stays within dict_dir
+                    let canonical_file = match file_path.canonicalize() {
+                        Ok(p) => p,
+                        Err(e) => {
+                            warn!("Failed to resolve referenced file {:?}: {}", file_path, e);
+                            return String::new();
+                        }
+                    };
+                    let canonical_dir = match dict_dir.canonicalize() {
+                        Ok(p) => p,
+                        Err(e) => {
+                            warn!("Failed to canonicalize dict dir {:?}: {}", dict_dir, e);
+                            return String::new();
+                        }
+                    };
+                    if !canonical_file.starts_with(&canonical_dir) {
+                        warn!(
+                            "Rejected @file reference escaping dict dir: {:?} not under {:?}",
+                            canonical_file, canonical_dir
+                        );
+                        return String::new();
+                    }
+
+                    match fs::read_to_string(&canonical_file) {
                         Ok(file_content) => file_content,
                         Err(e) => {
                             warn!("Failed to read referenced file {:?}: {}", file_path, e);

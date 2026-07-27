@@ -89,10 +89,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
-    let port = 8181;
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8181").await?;
+    let port = std::env::var("PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(8181u16);
+    let host = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let addr = format!("{}:{}", host, port);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-    info!("app serve on http://localhost:{}", port);
+    info!("app serve on http://{}:{}", host, port);
 
     axum::serve(listener, app).await?;
 

@@ -533,25 +533,38 @@ fn parse_block_items_v2<'a>(
                 remaining[6],
                 remaining[7],
             ]) as usize;
-            remaining = &remaining[8..];
+            let after_offset = &remaining[8..];
 
             // 查找 UTF-16LE null terminator (\x00\x00)
             // 注意：需要在偶数位置查找
             let mut end_pos = 0;
-            while end_pos + 1 < remaining.len() {
-                if remaining[end_pos] == 0 && remaining[end_pos + 1] == 0 {
+            while end_pos + 1 < after_offset.len() {
+                if after_offset[end_pos] == 0 && after_offset[end_pos + 1] == 0 {
                     break;
                 }
                 end_pos += 2;
             }
 
-            if end_pos + 1 >= remaining.len() {
-                // 没有找到 null terminator，可能是最后一个条目
+            if end_pos + 1 >= after_offset.len() {
+                // 没有找到 null terminator — this is the last entry in the block.
+                // Consume all remaining text bytes instead of silently dropping.
+                let text_buf = after_offset;
+                remaining = &[];
+
+                if !text_buf.is_empty() {
+                    let text = UTF_16LE
+                        .decode(text_buf, encoding::DecoderTrap::Ignore)
+                        .unwrap_or_default();
+                    entries.push(RecordDeBufOffset {
+                        record_offset_in_debuf: offset,
+                        text,
+                    });
+                }
                 break;
             }
 
-            let text_buf = &remaining[..end_pos];
-            remaining = &remaining[end_pos + 2..]; // 跳过 2 字节的 null terminator
+            let text_buf = &after_offset[..end_pos];
+            remaining = &after_offset[end_pos + 2..]; // 跳过 2 字节的 null terminator
 
             // 解码 UTF-16LE
             let text = UTF_16LE

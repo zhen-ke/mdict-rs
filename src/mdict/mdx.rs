@@ -149,10 +149,16 @@ fn records_offset(
                 .ok_or_else(|| anyhow!("record start offset underflow"))?;
             let record_end_in_de_block = if i < records_debuf_index.len() - 1 {
                 let next_entry = &records_debuf_index[i + 1];
-                next_entry
-                    .record_offset_in_debuf
-                    .checked_sub(pre_blocks_dsize_sum)
-                    .ok_or_else(|| anyhow!("record end offset underflow"))?
+                // If the next entry belongs to a later block, clamp to current
+                // block boundary — the entry spans to the end of this block.
+                if next_entry.record_offset_in_debuf >= block_end {
+                    block.dsize
+                } else {
+                    next_entry
+                        .record_offset_in_debuf
+                        .checked_sub(pre_blocks_dsize_sum)
+                        .ok_or_else(|| anyhow!("record end offset underflow"))?
+                }
             } else {
                 // last entry
                 block.dsize

@@ -109,17 +109,13 @@ fn split_base_and_suffix(url: &str) -> (&str, &str) {
 }
 
 fn normalize_resource_path(path: &str) -> String {
-    let mut cleaned = path.trim().replace('\\', "/");
-    while cleaned.starts_with("./") {
-        cleaned = cleaned[2..].to_string();
-    }
-    while cleaned.starts_with('/') {
-        cleaned = cleaned[1..].to_string();
-    }
+    let cleaned = path.trim().replace('\\', "/");
+    let cleaned = cleaned.trim_start_matches("./");
+    let cleaned = cleaned.trim_start_matches('/');
 
     cleaned
         .split('/')
-        .filter(|part| !part.is_empty())
+        .filter(|part| !part.is_empty() && *part != ".." && *part != ".")
         .collect::<Vec<_>>()
         .join("/")
 }
