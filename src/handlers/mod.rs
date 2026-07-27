@@ -561,8 +561,9 @@ async fn resolve_static_file(
     }
 
     // Security: verify canonical path remains under static root when possible.
-    if let Ok(canonical) = static_file.canonicalize() {
-        if let Ok(base_canonical) = base_static_dir.canonicalize() {
+    // Use tokio::fs::canonicalize to avoid blocking the async runtime.
+    if let Ok(canonical) = fs::canonicalize(&static_file).await {
+        if let Ok(base_canonical) = fs::canonicalize(base_static_dir).await {
             if !canonical.starts_with(&base_canonical) {
                 tracing::warn!("Path escape attempt blocked: {:?}", static_file);
                 return None;

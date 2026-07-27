@@ -25,7 +25,18 @@ pub(crate) fn detect_content_type(word: &str) -> String {
 }
 
 fn extract_link_target(data: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(data).ok()?;
+    // Fast path: check raw bytes before paying for full UTF-8 conversion.
+    // Skip optional UTF-8 BOM (EF BB BF) if present.
+    let payload = if data.starts_with(b"\xef\xbb\xbf") {
+        &data[3..]
+    } else {
+        data
+    };
+    if !payload.starts_with(b"@@@LINK=") {
+        return None;
+    }
+
+    let text = std::str::from_utf8(payload).ok()?;
     let first_line = text.lines().next().unwrap_or("").trim();
     let linked = first_line.strip_prefix("@@@LINK=")?.trim();
     if linked.is_empty() {

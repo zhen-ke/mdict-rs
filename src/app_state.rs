@@ -1,11 +1,10 @@
 use std::collections::{HashMap, HashSet};
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use axum::body::Bytes;
-use lru::LruCache;
+use moka::sync::Cache;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use ripemd::{Digest, Ripemd160};
@@ -15,9 +14,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::config::{DictConfig, DictInfo};
 use crate::mdict::reader::MdxReader;
 
-const ENTRY_CACHE_SIZE: usize = 256;
-const RESOURCE_CACHE_SIZE: usize = 1024;
-const NEGATIVE_CACHE_SIZE: usize = 1024;
+const ENTRY_CACHE_SIZE: u64 = 256;
+const RESOURCE_CACHE_SIZE: u64 = 1024;
+const NEGATIVE_CACHE_SIZE: u64 = 1024;
 const DEFAULT_MAX_CONCURRENT_BLOCKING_QUERIES: usize = 64;
 const ENTRY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const RESOURCE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
@@ -27,7 +26,6 @@ const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(20);
 struct CachedPayload {
     data: Bytes,
     content_type: String,
-    expires_at: Instant,
 }
 
 struct DictCatalog {
@@ -115,9 +113,12 @@ struct RuntimeState {
     db_pools: RwLock<HashMap<PathBuf, Pool<SqliteConnectionManager>>>,
     mdx_readers: RwLock<HashMap<PathBuf, Arc<MdxReader>>>,
     blocking_query_slots: Arc<Semaphore>,
-    entry_cache: Mutex<LruCache<String, CachedPayload>>,
-    resource_cache: Mutex<LruCache<String, CachedPayload>>,
-    negative_cache: Mutex<LruCache<String, Instant>>,
+    /// Lock-free concurrent LRU cache for entry lookups (moka).
+    entry_cache: Cache<String, CachedPayload>,
+    /// Lock-free concurrent LRU cache for resource lookups (moka).
+    resource_cache: Cache<String, CachedPayload>,
+    /// Lock-free concurrent LRU cache for negative (miss) entries (moka).
+    negative_cache: Cache<String, ()>,
 }
 
 impl RuntimeState {
@@ -126,15 +127,18 @@ impl RuntimeState {
             db_pools: RwLock::new(HashMap::new()),
             mdx_readers: RwLock::new(HashMap::new()),
             blocking_query_slots: Arc::new(Semaphore::new(max_concurrent_blocking_queries)),
-            entry_cache: Mutex::new(LruCache::new(
-                NonZeroUsize::new(ENTRY_CACHE_SIZE).expect("ENTRY_CACHE_SIZE > 0"),
-            )),
-            resource_cache: Mutex::new(LruCache::new(
-                NonZeroUsize::new(RESOURCE_CACHE_SIZE).expect("RESOURCE_CACHE_SIZE > 0"),
-            )),
-            negative_cache: Mutex::new(LruCache::new(
-                NonZeroUsize::new(NEGATIVE_CACHE_SIZE).expect("NEGATIVE_CACHE_SIZE > 0"),
-            )),
+            entry_cache: Cache::builder()
+                .max_capacity(ENTRY_CACHE_SIZE)
+                .time_to_live(ENTRY_CACHE_TTL)
+                .build(),
+            resource_cache: Cache::builder()
+                .max_capacity(RESOURCE_CACHE_SIZE)
+                .time_to_live(RESOURCE_CACHE_TTL)
+                .build(),
+            negative_cache: Cache::builder()
+                .max_capacity(NEGATIVE_CACHE_SIZE)
+                .time_to_live(NEGATIVE_CACHE_TTL)
+                .build(),
         }
     }
 }
@@ -368,64 +372,31 @@ impl AppState {
     }
 
     pub fn get_entry_cached(&self, key: &str) -> Option<(Bytes, String)> {
-        Self::cache_get(&self.runtime.entry_cache, key)
+        self.runtime.entry_cache.get(key).map(|p| (p.data.clone(), p.content_type.clone()))
     }
 
     pub fn put_entry_cached(&self, key: String, data: Bytes, content_type: String) {
-        Self::cache_put(
-            &self.runtime.entry_cache,
-            key,
-            data,
-            content_type,
-            ENTRY_CACHE_TTL,
-        );
+        self.runtime.entry_cache.insert(key, CachedPayload { data, content_type });
     }
 
     pub fn get_resource_cached(&self, key: &str) -> Option<(Bytes, String)> {
-        Self::cache_get(&self.runtime.resource_cache, key)
+        self.runtime.resource_cache.get(key).map(|p| (p.data.clone(), p.content_type.clone()))
     }
 
     pub fn put_resource_cached(&self, key: String, data: Bytes, content_type: String) {
-        Self::cache_put(
-            &self.runtime.resource_cache,
-            key,
-            data,
-            content_type,
-            RESOURCE_CACHE_TTL,
-        );
+        self.runtime.resource_cache.insert(key, CachedPayload { data, content_type });
     }
 
     pub fn is_negative_cached(&self, key: &str) -> bool {
-        let now = Instant::now();
-        let mut cache = self
-            .runtime
-            .negative_cache
-            .lock()
-            .expect("negative_cache mutex poisoned");
-        if let Some(expiry) = cache.get(key).cloned() {
-            if expiry > now {
-                return true;
-            }
-            cache.pop(key);
-        }
-        false
+        self.runtime.negative_cache.contains_key(key)
     }
 
     pub fn put_negative_cache(&self, key: String) {
-        let expiry = Instant::now() + NEGATIVE_CACHE_TTL;
-        self.runtime
-            .negative_cache
-            .lock()
-            .expect("negative_cache mutex poisoned")
-            .put(key, expiry);
+        self.runtime.negative_cache.insert(key, ());
     }
 
     pub fn clear_negative_cache(&self, key: &str) {
-        self.runtime
-            .negative_cache
-            .lock()
-            .expect("negative_cache mutex poisoned")
-            .pop(key);
+        self.runtime.negative_cache.invalidate(key);
     }
 
     pub fn try_acquire_query_slot(&self) -> Option<OwnedSemaphorePermit> {
@@ -473,39 +444,6 @@ impl AppState {
 
         id_to_logical.insert(id.clone(), logical_key.to_string());
         id
-    }
-
-    fn cache_get(
-        cache: &Mutex<LruCache<String, CachedPayload>>,
-        key: &str,
-    ) -> Option<(Bytes, String)> {
-        let now = Instant::now();
-        let mut cache = cache.lock().expect("cache mutex poisoned");
-        if let Some(payload) = cache.get(key).cloned() {
-            if payload.expires_at > now {
-                return Some((payload.data, payload.content_type));
-            }
-            cache.pop(key);
-        }
-        None
-    }
-
-    fn cache_put(
-        cache: &Mutex<LruCache<String, CachedPayload>>,
-        key: String,
-        data: Bytes,
-        content_type: String,
-        ttl: Duration,
-    ) {
-        let payload = CachedPayload {
-            data,
-            content_type,
-            expires_at: Instant::now() + ttl,
-        };
-        cache
-            .lock()
-            .expect("cache mutex poisoned")
-            .put(key, payload);
     }
 }
 

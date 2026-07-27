@@ -27,9 +27,12 @@ mod util;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // 初始化日志系统
+    // 初始化日志系统（支持 RUST_LOG 环境变量覆盖，默认 info）
     tracing_subscriber::registry()
-        .with(EnvFilter::new("info"))
+        .with(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with(tracing_subscriber::fmt::layer())
         .init();
 

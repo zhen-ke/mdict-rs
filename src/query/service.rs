@@ -113,64 +113,79 @@ pub fn suggest(
 
     let prefix_lower = trimmed.to_lowercase();
     let query_limit = limit * 20;
-    let mut scores: HashMap<String, i32> = HashMap::new();
 
-    for file in filter_dict_files(state.dict_text_files(), state, filter) {
-        let conn = match state.get_db_connection(file) {
-            Ok(c) => c,
-            Err(e) => {
-                debug!("skip dict {:?}: {}", file, e);
-                continue;
-            }
-        };
+    // Parallelize suggest queries across dictionaries using Rayon.
+    let dict_files = filter_dict_files(state.dict_text_files(), state, filter);
+    let per_dict_scores: Vec<HashMap<String, i32>> = dict_files
+        .par_iter()
+        .map(|file| {
+            let mut local_scores: HashMap<String, i32> = HashMap::new();
+            let conn = match state.get_db_connection(file) {
+                Ok(c) => c,
+                Err(e) => {
+                    debug!("skip dict {:?}: {}", file, e);
+                    return local_scores;
+                }
+            };
 
-        let mut stmt = match conn.prepare(
-            "SELECT text, bm25(MDX_FTS) as score FROM MDX_FTS
+            let mut stmt = match conn.prepare(
+                "SELECT text, bm25(MDX_FTS) as score FROM MDX_FTS
                  WHERE MDX_FTS MATCH :query
                  ORDER BY score
                  LIMIT :limit;",
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                debug!("FTS not available for {:?}: {}", file, e);
-                merge_prefix_fallback(&mut scores, &conn, &prefix_lower, query_limit);
-                continue;
-            }
-        };
-
-        let rows = match stmt.query_map(
-            named_params! { ":query": fts_query.as_str(), ":limit": query_limit as i64 },
-            |row| {
-                let text: String = row.get(0)?;
-                let score: f64 = row.get(1)?;
-                Ok((text, score))
-            },
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!("FTS query failed for {:?}: {}", file, e);
-                merge_prefix_fallback(&mut scores, &conn, &prefix_lower, query_limit);
-                continue;
-            }
-        };
-
-        let mut fts_rows = 0usize;
-        for row in rows {
-            let Ok((word, bm25_score)) = row else {
-                continue;
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    debug!("FTS not available for {:?}: {}", file, e);
+                    merge_prefix_fallback(&mut local_scores, &conn, &prefix_lower, query_limit);
+                    return local_scores;
+                }
             };
-            if !is_suggest_candidate(&word) {
-                continue;
+
+            let rows = match stmt.query_map(
+                named_params! { ":query": fts_query.as_str(), ":limit": query_limit as i64 },
+                |row| {
+                    let text: String = row.get(0)?;
+                    let score: f64 = row.get(1)?;
+                    Ok((text, score))
+                },
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!("FTS query failed for {:?}: {}", file, e);
+                    merge_prefix_fallback(&mut local_scores, &conn, &prefix_lower, query_limit);
+                    return local_scores;
+                }
+            };
+
+            let mut fts_rows = 0usize;
+            for row in rows {
+                let Ok((word, bm25_score)) = row else {
+                    continue;
+                };
+                if !is_suggest_candidate(&word) {
+                    continue;
+                }
+
+                let word_lower = word.to_lowercase();
+                let score = calculate_fts_score(&prefix_lower, &word_lower, &word, bm25_score);
+                merge_score(&mut local_scores, word, score);
+                fts_rows += 1;
             }
 
-            let word_lower = word.to_lowercase();
-            let score = calculate_fts_score(&prefix_lower, &word_lower, &word, bm25_score);
-            merge_score(&mut scores, word, score);
-            fts_rows += 1;
-        }
+            if fts_rows == 0 {
+                merge_prefix_fallback(&mut local_scores, &conn, &prefix_lower, query_limit);
+            }
 
-        if fts_rows == 0 {
-            merge_prefix_fallback(&mut scores, &conn, &prefix_lower, query_limit);
+            local_scores
+        })
+        .collect();
+
+    // Merge per-dict score maps into global scores.
+    let mut scores: HashMap<String, i32> = HashMap::new();
+    for local in per_dict_scores {
+        for (word, score) in local {
+            merge_score(&mut scores, word, score);
         }
     }
 
