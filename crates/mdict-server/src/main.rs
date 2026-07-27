@@ -1,11 +1,11 @@
 use crate::app_state::AppState;
-use crate::config::{get_dict_dir, scan_dict_files, static_path};
+use crate::config::{DictConfig, get_dict_dir, scan_dict_files, static_path};
 use crate::handlers::{
     handle_dict_audio, handle_dict_entry, handle_dict_list, handle_dict_res, handle_dict_resource,
     handle_dict_script, handle_dict_style, handle_index_status, handle_lucky, handle_query,
     handle_resource, handle_suggest, handle_trace,
 };
-use crate::indexing::{db_path, indexing};
+use mdict_core::indexing::{IndexJob, db_path, indexing};
 
 use axum::{
     Router,
@@ -19,20 +19,14 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 mod app_state;
 mod config;
 mod handlers;
-mod indexing;
 mod lucky;
-mod mdict;
 mod query;
-mod util;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // 初始化日志系统（支持 RUST_LOG 环境变量覆盖，默认 info）
     tracing_subscriber::registry()
-        .with(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info")),
-        )
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(tracing_subscriber::fmt::layer())
         .init();
 
@@ -45,12 +39,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // 确保索引已生成（首次启动会花时间；后续有 .db 则很快）
     if !dict_files.is_empty() {
-        let files = dict_files.clone();
+        // FTS 仅对文本词典（.mdx）有意义；资源词典（.mdd）强制关闭。
+        // 单词典可通过同名 .toml 配置关闭 FTS。
+        let jobs: Vec<IndexJob> = dict_files
+            .iter()
+            .map(|file| {
+                let is_text_dict = !file
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("mdd"));
+                let fts_enabled = is_text_dict
+                    && DictConfig::load(file)
+                        .map(|cfg| cfg.is_fts_enabled())
+                        .unwrap_or(true);
+                IndexJob::new(file.clone(), fts_enabled)
+            })
+            .collect();
         info!(
             "Scheduling background index ensure for {} dictionary files",
-            files.len()
+            jobs.len()
         );
-        tokio::task::spawn_blocking(move || match indexing(&files, false) {
+        tokio::task::spawn_blocking(move || match indexing(&jobs, false) {
             Ok(()) => info!("Background indexing completed"),
             Err(e) => error!("Background indexing finished with errors: {}", e),
         });
@@ -92,7 +100,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
-    let port = std::env::var("PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(8181u16);
+    let port = std::env::var("PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8181u16);
     let host = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".to_string());
     let addr = format!("{}:{}", host, port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;

@@ -1,36 +1,11 @@
-[package]
-name = "mdict-rs"
-version = "0.1.0"
-authors = ["zhimoe"]
+[workspace]
+resolver = "3"
+members = ["crates/mdict-core", "crates/mdict-server"]
+
+[workspace.package]
 edition = "2024"
 
-
-[dependencies]
-anyhow = "1"
-serde_derive = "1"
-serde = "1"
-nom = "8"
-encoding = "0.2"
-adler32 = "1"
-rusqlite = { version = "0.37", features = ["bundled"] }
-r2d2 = "0.8"
-r2d2_sqlite = "0.31"
-flate2 = { version = "1", features = ["zlib"], default-features = false }
-rand = "0.9"
-minilzo-rs = "0.6"
-ripemd = "0.1"
-axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-tokio-util = { version = "0.7", features = ["io"] }
-tower-http = { version = "0.6", features = ["full"] }
-regex = "1"
-percent-encoding = "2"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-memmap2 = "0.9.9"
-mime_guess = "2.0.5"
-serde_json = "1.0.148"
-toml = "0.8"
-lru = "0.12"
-rayon = "1"
-moka = { version = "0.12.15", features = ["sync"] }
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

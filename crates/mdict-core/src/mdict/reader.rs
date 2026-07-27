@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::mdict::recordblock::record_block_parser;
-use axum::body::Bytes;
+use bytes::Bytes;
 use lru::LruCache;
 use memmap2::MmapOptions;
 use nom::Parser;

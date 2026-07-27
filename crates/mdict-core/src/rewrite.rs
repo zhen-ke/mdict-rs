@@ -6,7 +6,7 @@ use regex::Regex;
 
 static ATTR_RE: OnceLock<Regex> = OnceLock::new();
 
-pub(crate) fn rewrite_html(html: &str, dict_id: &str) -> String {
+pub fn rewrite_html(html: &str, dict_id: &str) -> String {
     let re = ATTR_RE.get_or_init(|| {
         Regex::new(r#"(?i)\b(src|href)=["']([^"']+)["']"#).expect("valid src/href attribute regex")
     });

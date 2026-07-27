@@ -1,0 +1,24 @@
+[package]
+name = "mdict-core"
+version = "0.1.0"
+authors = ["zhimoe"]
+edition.workspace = true
+description = "MDX/MDD 词典解析、SQLite 索引与纯查询逻辑（平台无关核心）"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+nom = "8"
+encoding = "0.2"
+adler32 = "1"
+bytes = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+flate2 = { version = "1", features = ["zlib"], default-features = false }
+minilzo-rs = "0.6"
+ripemd = "0.1"
+memmap2 = "0.9.9"
+lru = "0.12"
+rayon = "1"
+regex = "1"
+percent-encoding = "2"
+tracing = "0.1"

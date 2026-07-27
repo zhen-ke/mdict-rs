@@ -84,13 +84,17 @@ impl DictConfig {
         match content {
             Some(value) => {
                 let trimmed = value.trim();
-                if trimmed.starts_with('@') {
+                if let Some(filename) = trimmed.strip_prefix('@') {
                     // File reference: @filename.css
-                    let filename = &trimmed[1..];
-
                     // Reject obviously malicious paths before hitting the filesystem
-                    if filename.contains("..") || filename.starts_with('/') || filename.starts_with('\\') {
-                        warn!("Rejected @file reference with path traversal: {:?}", filename);
+                    if filename.contains("..")
+                        || filename.starts_with('/')
+                        || filename.starts_with('\\')
+                    {
+                        warn!(
+                            "Rejected @file reference with path traversal: {:?}",
+                            filename
+                        );
                         return String::new();
                     }
 

@@ -9,12 +9,12 @@ use response::{
 
 use crate::app_state::AppState;
 use crate::config::DictInfo;
-use crate::indexing::index_status;
 use crate::lucky;
 use crate::query::{
     DictFilter, QueryError, query, query_aggregate, query_specific_entry, query_specific_resource,
     query_with_trace, suggest,
 };
+use mdict_core::indexing::index_status;
 use serde_derive::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path as FsPath, PathBuf};
@@ -562,13 +562,12 @@ async fn resolve_static_file(
 
     // Security: verify canonical path remains under static root when possible.
     // Use tokio::fs::canonicalize to avoid blocking the async runtime.
-    if let Ok(canonical) = fs::canonicalize(&static_file).await {
-        if let Ok(base_canonical) = fs::canonicalize(base_static_dir).await {
-            if !canonical.starts_with(&base_canonical) {
-                tracing::warn!("Path escape attempt blocked: {:?}", static_file);
-                return None;
-            }
-        }
+    if let Ok(canonical) = fs::canonicalize(&static_file).await
+        && let Ok(base_canonical) = fs::canonicalize(base_static_dir).await
+        && !canonical.starts_with(&base_canonical)
+    {
+        tracing::warn!("Path escape attempt blocked: {:?}", static_file);
+        return None;
     }
 
     let metadata = match fs::metadata(&static_file).await {

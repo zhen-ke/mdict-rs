@@ -2,14 +2,14 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-pub(crate) struct AggregateSection {
+pub struct AggregateSection {
     pub dict_id: String,
     pub title: String,
     pub container_class: Option<String>,
     pub body: String,
 }
 
-pub(crate) fn render_aggregate_html(word: &str, sections: &[AggregateSection]) -> String {
+pub fn render_aggregate_html(word: &str, sections: &[AggregateSection]) -> String {
     let mut html = String::with_capacity(sections.len() * 4096);
     html.push_str(r#"<div class="mdict-aggregate">"#);
     html.push_str(&format!(
@@ -58,10 +58,13 @@ fn sanitize_dict_html(html: &str) -> String {
 
     let script_re = SCRIPT_RE
         .get_or_init(|| Regex::new(r"(?is)<script[^>]*>.*?</script>").expect("valid script regex"));
-    let event_re = EVENT_RE
-        .get_or_init(|| Regex::new(r#"(?i)\s+on\w+\s*=\s*["'][^"']*["']"#).expect("valid event regex"));
-    let js_url_re = JS_URL_RE
-        .get_or_init(|| Regex::new(r#"(?i)(src|href)\s*=\s*["']\s*javascript:[^"']*["']"#).expect("valid js url regex"));
+    let event_re = EVENT_RE.get_or_init(|| {
+        Regex::new(r#"(?i)\s+on\w+\s*=\s*["'][^"']*["']"#).expect("valid event regex")
+    });
+    let js_url_re = JS_URL_RE.get_or_init(|| {
+        Regex::new(r#"(?i)(src|href)\s*=\s*["']\s*javascript:[^"']*["']"#)
+            .expect("valid js url regex")
+    });
 
     let result = script_re.replace_all(html, "");
     let result = event_re.replace_all(&result, "");

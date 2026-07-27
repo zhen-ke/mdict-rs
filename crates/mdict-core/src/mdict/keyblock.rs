@@ -623,7 +623,7 @@ fn decode_entry_text(buf: &[u8], decoder: &'static dyn Encoding, is_utf8: bool) 
 }
 
 /// 解析一个 key block 得到的是bytes
-fn key_block_parser<'a>(input: &'a [u8], csize: usize, dsize: usize) -> IResult<&'a [u8], Vec<u8>> {
+fn key_block_parser(input: &[u8], csize: usize, dsize: usize) -> IResult<&[u8], Vec<u8>> {
     if csize < 8 {
         return Err(nom::Err::Failure(nom::error::Error::new(
             input,

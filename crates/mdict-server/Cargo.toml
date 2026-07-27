@@ -1,0 +1,33 @@
+[package]
+name = "mdict-rs"
+version = "0.1.0"
+authors = ["zhimoe"]
+edition.workspace = true
+description = "基于 mdict-core 的 MDX/MDD 词典 Web 服务"
+
+[[bin]]
+name = "mdict-rs"
+path = "src/main.rs"
+
+[dependencies]
+mdict-core = { path = "../mdict-core" }
+anyhow = "1"
+serde_derive = "1"
+serde = "1"
+adler32 = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.31"
+rand = "0.9"
+ripemd = "0.1"
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tower-http = { version = "0.6", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+mime_guess = "2.0.5"
+serde_json = "1.0.148"
+toml = "0.8"
+rayon = "1"
+moka = { version = "0.12.15", features = ["sync"] }

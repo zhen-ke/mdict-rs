@@ -9,18 +9,23 @@ mdict-rs is a web-based dictionary application built in Rust that supports MDX f
 ## Common Development Tasks
 
 ### Running the Application
+
 ```bash
 cargo run --bin mdict-rs
 ```
+
 The application runs on `http://localhost:8181` by default.
 
 ### Building
+
 ```bash
 cargo build
 ```
 
 ### Code Formatting
+
 This project uses rustfmt with specific configuration:
+
 ```bash
 cargo fmt
 ```
@@ -29,24 +34,24 @@ cargo fmt
 
 ### Core Components
 
-- **MDX File Processing** (`src/mdict/`): Parses MDX dictionary files into structured data
+- **MDX File Processing** (`crates/mdict-core/src/mdict/`): Parses MDX dictionary files into structured data
   - `header.rs`: Parses MDX file headers
   - `keyblock.rs`: Handles key blocks containing dictionary entries
   - `recordblock.rs`: Manages record blocks with definitions
   - `mdx.rs`: Main MDX file parser and coordinator
 
-- **Indexing System** (`src/indexing/`): Converts MDX files to SQLite databases for efficient querying
+- **Indexing System** (`crates/mdict-core/src/indexing/`): Converts MDX files to SQLite databases for efficient querying
   - Creates `.db` files alongside MDX files
   - Tables:
     - `MDX_INDEX(text, record_offset, record_length, block_offset, block_size, block_dsize)`
     - `MDX_FTS(text)` (optional, when FTS5 is available)
 
-- **Web Server** (`src/main.rs`, `src/handlers/`): Axum-based web server
+- **Web Server** (`crates/mdict-server/src/main.rs`, `crates/mdict-server/src/handlers/`): Axum-based web server
   - `/query`: POST endpoint for dictionary lookups
   - `/lucky`: GET endpoint for random word lookup
   - Static file serving from detected static directory (see Configuration)
 
-- **Query System** (`src/query/`): Handles dictionary queries across multiple MDX files
+- **Query System** (`crates/mdict-server/src/query/`): Handles dictionary queries across multiple MDX files
   - Searches through SQLite databases in scan order (MDX first; resources prefer MDD first)
 
 ### Configuration
@@ -78,24 +83,33 @@ cargo fmt
 
 ## File Structure
 
+本项目是 Cargo workspace，分为平台无关核心库与 Web 服务两个 crate：
+
 ```
-resources/
-└── static/        # Static files (CSS, etc.)
+crates/
+├── mdict-core/          # 平台无关核心（lib，无 HTTP 依赖）
+│   └── src/
+│       ├── mdict/       # MDX/MDD 文件解析与 mmap 记录读取
+│       ├── indexing/    # MDX to SQLite conversion
+│       ├── normalize.rs # 查询词归一化与词形候选
+│       ├── rewrite.rs   # 词条链接重写
+│       ├── presenter.rs # 聚合 HTML 渲染
+│       └── util/        # 加解密与基础解析工具
+│
+└── mdict-server/        # Web 服务（bin: mdict-rs）
+    ├── resources/
+    │   └── static/      # Static files (CSS, etc.)
+    └── src/
+        ├── config/      # Application configuration
+        ├── handlers/    # HTTP request handlers
+        ├── lucky/       # Random word selection
+        └── query/       # 查询编排（service/repository/specific）
 
 mdict/             # Dictionary files (default runtime location)
 ├── xxx.mdx
 ├── xxx.mdx.db
 ├── xxx.mdd
 └── xxx.mdd.db
-
-src/
-├── config/        # Application configuration
-├── handlers/      # HTTP request handlers
-├── indexing/      # MDX to SQLite conversion
-├── lucky/         # Random word selection
-├── mdict/         # MDX file parsing
-├── query/         # Dictionary query logic
-└── util/          # Utility functions
 ```
 
 ## Important Notes

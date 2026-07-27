@@ -5,7 +5,7 @@ use rusqlite::{Connection, named_params};
 use tracing::{debug, error};
 
 use crate::app_state::AppState;
-use crate::query::rewrite_html;
+use mdict_core::rewrite::rewrite_html;
 
 use super::error::QueryError;
 
@@ -104,14 +104,14 @@ pub(crate) fn lookup_record_in_file(
 
     let record_offset = loc.record_offset;
     let record_length = loc.record_length;
-    if let Some(max) = max_record_length {
-        if record_length > max {
-            debug!(
-                "skip oversized record {} bytes > {} for key '{}' in {:?}",
-                record_length, max, word, file
-            );
-            return Ok(None);
-        }
+    if let Some(max) = max_record_length
+        && record_length > max
+    {
+        debug!(
+            "skip oversized record {} bytes > {} for key '{}' in {:?}",
+            record_length, max, word, file
+        );
+        return Ok(None);
     }
     let block_offset = loc.block_offset;
     let block_csize = loc.block_csize;

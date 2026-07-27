@@ -8,9 +8,10 @@ use tracing::{debug, info, warn};
 
 use crate::app_state::AppState;
 
+use mdict_core::presenter::{AggregateSection, render_aggregate_html};
+
 use super::entry_query_candidates;
 use super::error::QueryError;
-use super::presenter::{AggregateSection, render_aggregate_html};
 use super::repository::{
     EntryCandidateLookup, MAX_RESOURCE_RECORD_BYTES, detect_content_type, lookup_entry_candidate,
     lookup_record_in_file, rewrite_entry_html_record,
@@ -444,10 +445,10 @@ fn calculate_fts_score(prefix: &str, word_lower: &str, word: &str, bm25_score: f
     if word_lower.starts_with(prefix) {
         score += 100;
     }
-    if let Some(ch) = prefix.chars().next() {
-        if word.starts_with(&ch.to_uppercase().to_string()) {
-            score += 20;
-        }
+    if let Some(ch) = prefix.chars().next()
+        && word.starts_with(&ch.to_uppercase().to_string())
+    {
+        score += 20;
     }
 
     score += 50 - word.len().min(50) as i32;

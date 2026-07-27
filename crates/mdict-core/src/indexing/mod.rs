@@ -6,7 +6,6 @@ use anyhow::Context;
 use memmap2::MmapOptions;
 use rusqlite::{Connection, params};
 
-use crate::config::DictConfig;
 use crate::mdict::mdx::Mdx;
 use tracing::{info, warn};
 
@@ -17,25 +16,42 @@ const META_SOURCE_SIZE: &str = "source_size";
 const META_SOURCE_MTIME: &str = "source_mtime";
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct IndexStatus {
+pub struct IndexStatus {
     pub db_exists: bool,
     pub up_to_date: bool,
     pub has_fts: bool,
 }
 
-pub(crate) fn db_path(dict_file: &Path) -> PathBuf {
+/// 一个待索引的词典文件及其索引选项。
+///
+/// FTS 是否启用由调用方（如 server 侧的词典配置）决定并以参数注入，
+/// 核心 crate 不依赖任何配置体系。
+#[derive(Debug, Clone)]
+pub struct IndexJob {
+    pub path: PathBuf,
+    /// 是否为该词典构建 FTS5 全文索引（通常对 .mdd 资源词典关闭）
+    pub fts_enabled: bool,
+}
+
+impl IndexJob {
+    pub fn new(path: PathBuf, fts_enabled: bool) -> Self {
+        Self { path, fts_enabled }
+    }
+}
+
+pub fn db_path(dict_file: &Path) -> PathBuf {
     PathBuf::from(format!("{}.db", dict_file.to_string_lossy()))
 }
 
 /// indexing all mdx files into db
-pub(crate) fn indexing(files: &[PathBuf], reindex: bool) -> anyhow::Result<()> {
+pub fn indexing(jobs: &[IndexJob], reindex: bool) -> anyhow::Result<()> {
     use rayon::prelude::*;
 
-    let failures: Vec<(PathBuf, anyhow::Error)> = files
+    let failures: Vec<(PathBuf, anyhow::Error)> = jobs
         .par_iter()
-        .filter_map(|file| match ensure_index(file, reindex) {
+        .filter_map(|job| match ensure_index(job, reindex) {
             Ok(()) => None,
-            Err(e) => Some((file.clone(), e)),
+            Err(e) => Some((job.path.clone(), e)),
         })
         .collect();
 
@@ -52,7 +68,8 @@ pub(crate) fn indexing(files: &[PathBuf], reindex: bool) -> anyhow::Result<()> {
     }
 }
 
-pub(crate) fn ensure_index(file: &Path, reindex: bool) -> anyhow::Result<()> {
+pub fn ensure_index(job: &IndexJob, reindex: bool) -> anyhow::Result<()> {
+    let file = &job.path;
     let db_path = db_path(file);
     if db_path.exists() {
         let needs_reindex = if reindex {
@@ -77,7 +94,7 @@ pub(crate) fn ensure_index(file: &Path, reindex: bool) -> anyhow::Result<()> {
                 file, db_path
             );
             let start = std::time::Instant::now();
-            mdx_to_sqlite(file)?;
+            mdx_to_sqlite(file, job.fts_enabled)?;
             tracing::info!(
                 "Index built for {:?} in {:.2}s",
                 file,
@@ -88,7 +105,7 @@ pub(crate) fn ensure_index(file: &Path, reindex: bool) -> anyhow::Result<()> {
     }
 
     let start = std::time::Instant::now();
-    mdx_to_sqlite(file)?;
+    mdx_to_sqlite(file, job.fts_enabled)?;
     tracing::info!(
         "Index built for {:?} in {:.2}s",
         file,
@@ -97,7 +114,7 @@ pub(crate) fn ensure_index(file: &Path, reindex: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) fn index_status(file: &Path) -> anyhow::Result<IndexStatus> {
+pub fn index_status(file: &Path) -> anyhow::Result<IndexStatus> {
     let db_file = db_path(file);
     if !db_file.exists() {
         return Ok(IndexStatus {
@@ -118,7 +135,10 @@ pub(crate) fn index_status(file: &Path) -> anyhow::Result<IndexStatus> {
 }
 
 /// mdx entries and definition to sqlite table
-pub(crate) fn mdx_to_sqlite(file: &Path) -> anyhow::Result<()> {
+///
+/// `fts_enabled`: 是否为此文件构建 FTS5 全文索引（仅对文本词典有意义；
+/// .mdd 资源词典内部会被强制关闭）。
+pub fn mdx_to_sqlite(file: &Path, fts_enabled: bool) -> anyhow::Result<()> {
     let db_file = db_path(file);
     let mut conn = Connection::open(&db_file)?;
     // Tune SQLite for a bulk index build.
@@ -161,15 +181,9 @@ pub(crate) fn mdx_to_sqlite(file: &Path) -> anyhow::Result<()> {
     let is_text_dict = !file
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("mdd"));
+    let fts_allowed = is_text_dict && fts_enabled;
     let mut fts_enabled = false;
-    let fts_allowed = if is_text_dict {
-        DictConfig::load(file)
-            .map(|cfg| cfg.is_fts_enabled())
-            .unwrap_or(true)
-    } else {
-        false
-    };
-    if is_text_dict && fts_allowed {
+    if fts_allowed {
         match conn.execute(
             "create virtual table if not exists MDX_FTS using fts5(text, tokenize='unicode61 remove_diacritics 2')",
             params![],
@@ -185,7 +199,7 @@ pub(crate) fn mdx_to_sqlite(file: &Path) -> anyhow::Result<()> {
             }
         }
     } else if is_text_dict {
-        info!("FTS disabled by config for {:?}", file);
+        info!("FTS disabled by caller for {:?}", file);
     }
 
     let tx = conn
@@ -227,12 +241,12 @@ pub(crate) fn mdx_to_sqlite(file: &Path) -> anyhow::Result<()> {
             ])
             .with_context(|| "insert MDX_INDEX table error")?;
 
-            if let Some(ref mut fts_stmt) = fts_stmt {
-                if should_index_in_fts(&r.text) {
-                    fts_stmt
-                        .execute(params![r.text])
-                        .with_context(|| "insert MDX_FTS table error")?;
-                }
+            if let Some(ref mut fts_stmt) = fts_stmt
+                && should_index_in_fts(&r.text)
+            {
+                fts_stmt
+                    .execute(params![r.text])
+                    .with_context(|| "insert MDX_FTS table error")?;
             }
         }
     }

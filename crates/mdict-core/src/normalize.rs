@@ -1,6 +1,6 @@
 const MAX_QUERY_CANDIDATES: usize = 32;
 
-pub(crate) fn entry_query_candidates(word: &str) -> Vec<String> {
+pub fn entry_query_candidates(word: &str) -> Vec<String> {
     let mut candidates = Vec::with_capacity(16);
 
     let raw = word.trim();

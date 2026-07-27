@@ -12,7 +12,7 @@ use rusqlite::OpenFlags;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::config::{DictConfig, DictInfo};
-use crate::mdict::reader::MdxReader;
+use mdict_core::mdict::reader::MdxReader;
 
 const ENTRY_CACHE_SIZE: u64 = 256;
 const RESOURCE_CACHE_SIZE: u64 = 1024;
@@ -372,19 +372,29 @@ impl AppState {
     }
 
     pub fn get_entry_cached(&self, key: &str) -> Option<(Bytes, String)> {
-        self.runtime.entry_cache.get(key).map(|p| (p.data.clone(), p.content_type.clone()))
+        self.runtime
+            .entry_cache
+            .get(key)
+            .map(|p| (p.data.clone(), p.content_type.clone()))
     }
 
     pub fn put_entry_cached(&self, key: String, data: Bytes, content_type: String) {
-        self.runtime.entry_cache.insert(key, CachedPayload { data, content_type });
+        self.runtime
+            .entry_cache
+            .insert(key, CachedPayload { data, content_type });
     }
 
     pub fn get_resource_cached(&self, key: &str) -> Option<(Bytes, String)> {
-        self.runtime.resource_cache.get(key).map(|p| (p.data.clone(), p.content_type.clone()))
+        self.runtime
+            .resource_cache
+            .get(key)
+            .map(|p| (p.data.clone(), p.content_type.clone()))
     }
 
     pub fn put_resource_cached(&self, key: String, data: Bytes, content_type: String) {
-        self.runtime.resource_cache.insert(key, CachedPayload { data, content_type });
+        self.runtime
+            .resource_cache
+            .insert(key, CachedPayload { data, content_type });
     }
 
     pub fn is_negative_cached(&self, key: &str) -> bool {
