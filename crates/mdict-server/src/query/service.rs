@@ -10,11 +10,12 @@ use crate::app_state::AppState;
 
 use mdict_core::presenter::{AggregateSection, render_aggregate_html};
 
+use super::canonical_normalize;
 use super::entry_query_candidates;
 use super::error::QueryError;
 use super::repository::{
     EntryCandidateLookup, MAX_RESOURCE_RECORD_BYTES, detect_content_type, lookup_entry_candidate,
-    lookup_record_in_file, rewrite_entry_html_record,
+    lookup_entry_candidate_normalized, lookup_record_in_file, rewrite_entry_html_record,
 };
 use super::specific::query_specific_entry;
 
@@ -113,6 +114,7 @@ pub fn suggest(
     };
 
     let prefix_lower = trimmed.to_lowercase();
+    let canonical = canonical_normalize(trimmed);
     let query_limit = limit * 20;
 
     // Parallelize suggest queries across dictionaries using Rayon.
@@ -138,7 +140,13 @@ pub fn suggest(
                 Ok(s) => s,
                 Err(e) => {
                     debug!("FTS not available for {:?}: {}", file, e);
-                    merge_prefix_fallback(&mut local_scores, &conn, &prefix_lower, query_limit);
+                    merge_prefix_fallback(
+                        &mut local_scores,
+                        &conn,
+                        &canonical,
+                        &prefix_lower,
+                        query_limit,
+                    );
                     return local_scores;
                 }
             };
@@ -154,7 +162,13 @@ pub fn suggest(
                 Ok(r) => r,
                 Err(e) => {
                     warn!("FTS query failed for {:?}: {}", file, e);
-                    merge_prefix_fallback(&mut local_scores, &conn, &prefix_lower, query_limit);
+                    merge_prefix_fallback(
+                        &mut local_scores,
+                        &conn,
+                        &canonical,
+                        &prefix_lower,
+                        query_limit,
+                    );
                     return local_scores;
                 }
             };
@@ -175,7 +189,13 @@ pub fn suggest(
             }
 
             if fts_rows == 0 {
-                merge_prefix_fallback(&mut local_scores, &conn, &prefix_lower, query_limit);
+                merge_prefix_fallback(
+                    &mut local_scores,
+                    &conn,
+                    &canonical,
+                    &prefix_lower,
+                    query_limit,
+                );
             }
 
             local_scores
@@ -228,6 +248,30 @@ fn query_internal(
     };
 
     for file in files {
+        if !is_resource_key(&w) {
+            // 规范化键一次性精确匹配：命中大小写/变音/标点/空白变体即短路候选展开。
+            let canonical = canonical_normalize(&w);
+            if !canonical.is_empty() {
+                match lookup_entry_candidate_normalized(state, file, &canonical)? {
+                    EntryCandidateLookup::Miss => {}
+                    EntryCandidateLookup::Redirect(linked_word) => {
+                        info!(
+                            "following normalized @@@LINK redirect: {} -> {}",
+                            w, linked_word
+                        );
+                        return query_internal(state, linked_word, depth + 1);
+                    }
+                    EntryCandidateLookup::Hit(data) => {
+                        let html = if let Some(dict_id) = state.get_dict_id(file) {
+                            rewrite_entry_html_record(data, &dict_id)
+                        } else {
+                            data
+                        };
+                        return Ok((html, "text/html".to_string()));
+                    }
+                }
+            }
+        }
         for candidate in &candidates {
             if is_resource_key(candidate) {
                 let Some(data) =
@@ -336,10 +380,11 @@ fn query_aggregate_entries(
 fn merge_prefix_fallback(
     scores: &mut HashMap<String, i32>,
     conn: &Connection,
+    canonical: &str,
     prefix_lower: &str,
     query_limit: usize,
 ) {
-    let fallback = prefix_search(conn, prefix_lower, query_limit);
+    let fallback = prefix_search_normalized(conn, canonical, query_limit);
     for (rank, word) in fallback.into_iter().enumerate() {
         if !is_suggest_candidate(&word) {
             continue;
@@ -359,40 +404,43 @@ fn merge_score(scores: &mut HashMap<String, i32>, word: String, score: i32) {
     }
 }
 
-fn prefix_search(conn: &Connection, prefix_lower: &str, limit: usize) -> Vec<String> {
-    let pattern = format!("{}%", prefix_lower);
+/// 在 `normalized` 覆盖索引上做字典序区间扫描（`>= lo AND < hi`），
+/// 取代旧的 `LIKE 'prefix%'` 允底。规范化列已折叠大小写/变音/标点，
+/// 因此一次区间扫描即可覆盖变音变体（如输 "cafe" 命中 "café"），
+/// 且有严格延迟上界（非全索引扫描）。
+fn prefix_search_normalized(conn: &Connection, canonical: &str, limit: usize) -> Vec<String> {
+    let Some(hi) = mdict_core::normalize::prefix_upper(canonical) else {
+        // 末位码点溢出（退化场景）：退化为只取 >= lo。
+        let mut stmt = match conn.prepare(
+            "SELECT text FROM MDX_INDEX WHERE normalized >= :lo \
+             AND length(text) < 50 ORDER BY length(text), text LIMIT :limit;",
+        ) {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+        let rows = match stmt.query_map(
+            named_params! { ":lo": canonical, ":limit": limit as i64 },
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(r) => r,
+            Err(_) => return vec![],
+        };
+        return rows.filter_map(|r| r.ok()).collect();
+    };
     let mut stmt = match conn.prepare(
-        "SELECT text FROM MDX_INDEX
-         WHERE text LIKE :pattern COLLATE NOCASE
-         AND text NOT LIKE '\\%'
-         AND text NOT LIKE '@%'
-         AND text NOT LIKE '%@%'
-         AND text NOT LIKE '0%'
-         AND text NOT LIKE '1%'
-         AND text NOT LIKE '2%'
-         AND text NOT LIKE '3%'
-         AND text NOT LIKE '4%'
-         AND text NOT LIKE '5%'
-         AND text NOT LIKE '6%'
-         AND text NOT LIKE '7%'
-         AND text NOT LIKE '8%'
-         AND text NOT LIKE '9%'
-         AND LENGTH(text) < 50
-         ORDER BY LENGTH(text), text
-         LIMIT :limit;",
+        "SELECT text FROM MDX_INDEX WHERE normalized >= :lo AND normalized < :hi \
+         AND length(text) < 50 ORDER BY length(text), text LIMIT :limit;",
     ) {
         Ok(s) => s,
         Err(_) => return vec![],
     };
-
     let rows = match stmt.query_map(
-        named_params! { ":pattern": pattern, ":limit": limit as i64 },
+        named_params! { ":lo": canonical, ":hi": hi, ":limit": limit as i64 },
         |row| row.get::<_, String>(0),
     ) {
         Ok(r) => r,
         Err(_) => return vec![],
     };
-
     rows.filter_map(|r| r.ok()).collect()
 }
 
@@ -429,7 +477,9 @@ fn is_suggest_candidate(word: &str) -> bool {
     if word.contains('/') || word.contains('\\') || word.contains('<') || word.contains('>') {
         return false;
     }
-    if word.starts_with('-') || word.starts_with('.') {
+    if let Some(first) = word.chars().next()
+        && (first == '-' || first == '.' || first.is_ascii_digit())
+    {
         return false;
     }
     true

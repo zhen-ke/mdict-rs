@@ -1,5 +1,28 @@
 const MAX_QUERY_CANDIDATES: usize = 32;
 
+/// 规范化归一：小写 + 折叠拉丁变音符号 + 折叠标点为空格 + 合并空白。
+///
+/// 用于索引时计算 `normalized` 列与查询时的规范化候选，使 "Café—menu"、
+/// "cafe menu"、"CAFE MENU" 等大小写/变音/标点/空白变体归一到同一键。
+/// 单独一次 `WHERE normalized = ?` 即可命中这些变体，无需展开 32 个候选。
+/// 注意：词形回退（running→run）不是归一化能覆盖的，仍走候选展开。
+pub fn canonical_normalize(input: &str) -> String {
+    let lower = input.to_lowercase();
+    let folded = fold_latin_diacritics(&lower);
+    fold_punctuation_to_space(&folded)
+}
+
+/// 计算字典序上界，用于 `normalized` 列的前缀区间扫描
+/// (`normalized >= lo AND normalized < hi`)。
+/// 将末位 codepoint +1；若溢出则返回 `None`（调用方退化为只取 `>= lo`）。
+pub fn prefix_upper(prefix: &str) -> Option<String> {
+    let mut chars: Vec<char> = prefix.chars().collect();
+    let last = chars.last_mut()?;
+    let new_val = u32::from(*last).checked_add(1)?;
+    *last = char::from_u32(new_val)?;
+    Some(chars.into_iter().collect())
+}
+
 pub fn entry_query_candidates(word: &str) -> Vec<String> {
     let mut candidates = Vec::with_capacity(16);
 
@@ -276,5 +299,26 @@ mod tests {
     fn has_irregular_lemma() {
         let c = entry_query_candidates("went");
         assert!(c.contains(&"go".to_string()));
+    }
+
+    #[test]
+    fn canonical_normalize_folds_case_diacritics_and_punctuation() {
+        use super::canonical_normalize;
+        assert_eq!(canonical_normalize("Café—menu"), "cafe menu");
+        assert_eq!(canonical_normalize("CAFE MENU"), "cafe menu");
+        assert_eq!(canonical_normalize("naïve"), "naive");
+        assert_eq!(canonical_normalize("it's"), "it's");
+        assert_eq!(canonical_normalize("  Hello,World  "), "hello world");
+    }
+
+    #[test]
+    fn prefix_upper_increments_last_codepoint() {
+        use super::prefix_upper;
+        assert_eq!(prefix_upper("cafe").as_deref(), Some("caff"));
+        assert_eq!(prefix_upper("a").as_deref(), Some("b"));
+        // CJK 末位码点 +1 仍是合法 char
+        assert!(prefix_upper("你好").is_some());
+        // 最大码点溢出 → None
+        assert_eq!(prefix_upper("\u{10FFFF}"), None);
     }
 }

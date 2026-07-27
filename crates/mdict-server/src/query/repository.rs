@@ -72,6 +72,22 @@ pub(crate) fn lookup_entry_candidate(
     Ok(EntryCandidateLookup::Hit(data))
 }
 
+/// 按 `normalized` 列一次性精确匹配，命中大小写/变音/标点/空白变体，
+/// 命中即短路 32 候选展开；未命中回退到候选循环（词形回退等）。
+pub(crate) fn lookup_entry_candidate_normalized(
+    state: &AppState,
+    file: &Path,
+    canonical: &str,
+) -> Result<EntryCandidateLookup, QueryError> {
+    let Some(data) = lookup_record_in_file_normalized(state, file, canonical, None)? else {
+        return Ok(EntryCandidateLookup::Miss);
+    };
+    if let Some(linked_word) = extract_link_target(&data) {
+        return Ok(EntryCandidateLookup::Redirect(linked_word));
+    }
+    Ok(EntryCandidateLookup::Hit(data))
+}
+
 pub(crate) fn rewrite_entry_html_record(data: Bytes, dict_id: &str) -> Bytes {
     let rewritten = match std::str::from_utf8(&data) {
         Ok(text) => rewrite_html(text, dict_id),
@@ -101,15 +117,43 @@ pub(crate) fn lookup_record_in_file(
     let Some(loc) = fetch_record_location(&conn, file, word)? else {
         return Ok(None);
     };
+    read_record_at(state, file, &loc, max_record_length)
+}
 
+/// 按 `normalized` 列查资源/词条定位（覆盖索引，O(log n)）。
+pub(crate) fn lookup_record_in_file_normalized(
+    state: &AppState,
+    file: &Path,
+    canonical: &str,
+    max_record_length: Option<usize>,
+) -> Result<Option<Bytes>, QueryError> {
+    let conn = match state.get_db_connection(file) {
+        Ok(c) => c,
+        Err(e) => {
+            debug!("skip dict {:?}: {}", file, e);
+            return Ok(None);
+        }
+    };
+    let Some(loc) = fetch_record_location_normalized(&conn, file, canonical)? else {
+        return Ok(None);
+    };
+    read_record_at(state, file, &loc, max_record_length)
+}
+
+fn read_record_at(
+    state: &AppState,
+    file: &Path,
+    loc: &RecordLocation,
+    max_record_length: Option<usize>,
+) -> Result<Option<Bytes>, QueryError> {
     let record_offset = loc.record_offset;
     let record_length = loc.record_length;
     if let Some(max) = max_record_length
         && record_length > max
     {
         debug!(
-            "skip oversized record {} bytes > {} for key '{}' in {:?}",
-            record_length, max, word, file
+            "skip oversized record {} bytes > {} in {:?}",
+            record_length, max, file
         );
         return Ok(None);
     }
@@ -133,7 +177,6 @@ pub(crate) fn lookup_record_in_file(
             error!("{}", err);
             QueryError::Internal(err)
         })?;
-
     Ok(Some(data))
 }
 
@@ -156,13 +199,31 @@ fn fetch_record_location(
                              from MDX_INDEX where text = :word order by rowid asc limit 1;";
     const NOCASE_SQL: &str = "select record_offset, record_length, block_offset, block_size, block_dsize \
                               from MDX_INDEX where text = :word collate nocase order by rowid asc limit 1;";
+    const NORMALIZED_SQL: &str = "select record_offset, record_length, block_offset, block_size, block_dsize \
+                                  from MDX_INDEX where normalized = :word order by rowid asc limit 1;";
 
     let exact = query_record_location(conn, EXACT_SQL, file, word)?;
     if exact.is_some() {
         return Ok(exact);
     }
 
-    query_record_location(conn, NOCASE_SQL, file, word)
+    let nocase = query_record_location(conn, NOCASE_SQL, file, word)?;
+    if nocase.is_some() {
+        return Ok(nocase);
+    }
+
+    // 最后回退到 normalized 列：覆盖大小写/变音/标点/空白变体。
+    query_record_location(conn, NORMALIZED_SQL, file, word)
+}
+
+fn fetch_record_location_normalized(
+    conn: &Connection,
+    file: &Path,
+    canonical: &str,
+) -> Result<Option<RecordLocation>, QueryError> {
+    const NORMALIZED_SQL: &str = "select record_offset, record_length, block_offset, block_size, block_dsize \
+                                  from MDX_INDEX where normalized = :word order by rowid asc limit 1;";
+    query_record_location(conn, NORMALIZED_SQL, file, canonical)
 }
 
 fn query_record_location(
@@ -211,7 +272,7 @@ fn query_record_location(
 
 #[cfg(test)]
 mod tests {
-    use super::fetch_record_location;
+    use super::{fetch_record_location, fetch_record_location_normalized};
     use rusqlite::Connection;
     use std::path::Path;
 
@@ -220,6 +281,7 @@ mod tests {
             "create table MDX_INDEX (
                 id integer primary key,
                 text text not null,
+                normalized text,
                 record_offset integer not null,
                 record_length integer not null,
                 block_offset integer not null,
@@ -227,7 +289,8 @@ mod tests {
                 block_dsize integer not null
              );
              create index idx_mdx_text on MDX_INDEX(text);
-             create index idx_mdx_text_nocase on MDX_INDEX(text collate nocase);",
+             create index idx_mdx_text_nocase on MDX_INDEX(text collate nocase);
+             create index idx_mdx_normalized on MDX_INDEX(normalized, record_offset, record_length, block_offset, block_size, block_dsize);",
         )
         .expect("create schema");
     }
@@ -272,5 +335,43 @@ mod tests {
             .expect("location");
         assert_eq!(loc.record_offset, 7);
         assert_eq!(loc.block_offset, 9);
+    }
+
+    #[test]
+    fn normalized_fallback_hits_when_exact_and_nocase_miss() {
+        // 词典中存的是带变音符号/大写的 "Café"，规范化后为 "cafe"。
+        // 查 "cafe"：精确与 nocase 都不到（nocase 不折变音），
+        // 最终靠 normalized 列命中。
+        let conn = Connection::open_in_memory().expect("open sqlite");
+        setup_index(&conn);
+        conn.execute(
+            "insert into MDX_INDEX(text, normalized, record_offset, record_length, block_offset, block_size, block_dsize)
+             values ('Café', 'cafe', 5, 6, 7, 8, 9)",
+            [],
+        )
+        .expect("insert Café");
+
+        let loc = fetch_record_location(&conn, Path::new("dummy.mdx"), "cafe")
+            .expect("query")
+            .expect("location");
+        assert_eq!(loc.record_offset, 5);
+    }
+
+    #[test]
+    fn fetch_record_location_normalized_direct_hit() {
+        let conn = Connection::open_in_memory().expect("open sqlite");
+        setup_index(&conn);
+        conn.execute(
+            "insert into MDX_INDEX(text, normalized, record_offset, record_length, block_offset, block_size, block_dsize)
+             values ('Naïve', 'naive', 11, 12, 13, 14, 15)",
+            [],
+        )
+        .expect("insert Naïve");
+
+        let loc = fetch_record_location_normalized(&conn, Path::new("dummy.mdx"), "naive")
+            .expect("query")
+            .expect("location");
+        assert_eq!(loc.record_offset, 11);
+        assert_eq!(loc.block_dsize, 15);
     }
 }

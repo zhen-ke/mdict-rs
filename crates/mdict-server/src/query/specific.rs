@@ -1,8 +1,8 @@
 use crate::app_state::AppState;
 use crate::query::{
-    EntryCandidateLookup, MAX_RESOURCE_RECORD_BYTES, QueryError, detect_content_type,
-    entry_query_candidates, lookup_entry_candidate, lookup_record_in_file,
-    rewrite_entry_html_record,
+    EntryCandidateLookup, MAX_RESOURCE_RECORD_BYTES, QueryError, canonical_normalize,
+    detect_content_type, entry_query_candidates, lookup_entry_candidate,
+    lookup_entry_candidate_normalized, lookup_record_in_file, rewrite_entry_html_record,
 };
 use axum::body::Bytes;
 use std::path::Path;
@@ -48,6 +48,32 @@ fn query_specific_entry_internal(
     let candidates = entry_query_candidates(word);
     if candidates.is_empty() {
         return Ok(None);
+    }
+
+    // 先用规范化键一次性精确匹配：命中大小写/变音/标点/空白变体即短路
+    // 32 候选展开（一次覆盖索引查询）。未命中再走候选循环（词形回退等）。
+    let canonical = canonical_normalize(word);
+    if !canonical.is_empty() {
+        match lookup_entry_candidate_normalized(state, file, &canonical)? {
+            EntryCandidateLookup::Miss => {}
+            EntryCandidateLookup::Redirect(linked_word) => {
+                info!(
+                    "following normalized @@@LINK redirect: {} -> {}",
+                    word, linked_word
+                );
+                return query_specific_entry_internal(
+                    state,
+                    file,
+                    &linked_word,
+                    dict_id,
+                    depth + 1,
+                );
+            }
+            EntryCandidateLookup::Hit(data) => {
+                let data = rewrite_entry_html_record(data, dict_id);
+                return Ok(Some((data, "text/html".to_string())));
+            }
+        }
     }
 
     for candidate in candidates {

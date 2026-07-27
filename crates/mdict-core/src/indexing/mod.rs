@@ -9,7 +9,7 @@ use rusqlite::{Connection, params};
 use crate::mdict::mdx::Mdx;
 use tracing::{info, warn};
 
-const INDEX_SCHEMA_VERSION: i64 = 3;
+const INDEX_SCHEMA_VERSION: i64 = 4;
 const META_TABLE: &str = "MDX_META";
 const META_SCHEMA_VERSION: &str = "schema_version";
 const META_SOURCE_SIZE: &str = "source_size";
@@ -160,6 +160,7 @@ pub fn mdx_to_sqlite(file: &Path, fts_enabled: bool) -> anyhow::Result<()> {
         "create table if not exists MDX_INDEX (
                 id integer primary key,
                 text text not null,
+                normalized text,
                 record_offset integer not null,
                 record_length integer not null,
                 block_offset integer not null,
@@ -209,7 +210,7 @@ pub fn mdx_to_sqlite(file: &Path, fts_enabled: bool) -> anyhow::Result<()> {
     {
         let mut stmt = tx
             .prepare_cached(
-                "insert into MDX_INDEX(text, record_offset, record_length, block_offset, block_size, block_dsize) values (?,?,?,?,?,?)",
+                "insert into MDX_INDEX(text, normalized, record_offset, record_length, block_offset, block_size, block_dsize) values (?,?,?,?,?,?)",
             )
             .with_context(|| "prepare insert statement failed")?;
         let mut fts_stmt = if fts_enabled {
@@ -231,8 +232,16 @@ pub fn mdx_to_sqlite(file: &Path, fts_enabled: bool) -> anyhow::Result<()> {
                         r.text, r.record_start_in_de_block, r.record_end_in_de_block
                     )
                 })?;
+            // 仅对文本词典计算 normalized；资源词典（.mdd）的 text 是路径，
+            // 归一化会破坏路径匹配，故存 NULL。
+            let normalized = if is_text_dict {
+                Some(crate::normalize::canonical_normalize(&r.text))
+            } else {
+                None
+            };
             stmt.execute(params![
                 r.text,
+                normalized,
                 r.record_start_in_de_block,
                 record_length,
                 r.block_offset_in_buf,
@@ -265,6 +274,13 @@ pub fn mdx_to_sqlite(file: &Path, fts_enabled: bool) -> anyhow::Result<()> {
         params![],
     )
     .with_context(|| "create idx_mdx_text_nocase failed")?;
+    // normalized 覆盖索引：一次 `WHERE normalized = ?` 即返回全部定位列，
+    // 避免回表；也支撑前缀区间扫描 suggest。
+    conn.execute(
+        "create index if not exists idx_mdx_normalized on MDX_INDEX(normalized, record_offset, record_length, block_offset, block_size, block_dsize)",
+        params![],
+    )
+    .with_context(|| "create idx_mdx_normalized failed")?;
     // FTS5 incremental merge can leave a large pending segment; force it to
     // flush + optimize now so the first query doesn't pay the merge cost.
     if fts_enabled {
