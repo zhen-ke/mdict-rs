@@ -914,15 +914,23 @@ footer span {
 }
 
 /* 音标 (IPA) */
-#mdx-resp .pron {
+#mdx-resp .pron,
+#mdx-resp .PRON,
+#mdx-resp .phon,
+#mdx-resp .ipa {
 	color: #38bdf8 !important;
 	font-family: var(--font-phonetic) !important;
 	font-size: 0.95rem !important;
-	margin: 0 4px;
+	font-weight: 500 !important;
+	margin: 0 6px 0 4px !important;
+	letter-spacing: 0.02em !important;
 }
 
-/* 词性 Badge (PoS) */
-#mdx-resp .pos {
+/* 词性与语法 Badge (PoS / Gram / Register) */
+#mdx-resp .pos,
+#mdx-resp .POS,
+#mdx-resp .register,
+#mdx-resp .REGISTER {
 	display: inline-block !important;
 	color: #c4b5fd !important;
 	background: rgba(167, 139, 250, 0.12) !important;
@@ -932,7 +940,7 @@ footer span {
 	font-size: 0.82rem !important;
 	font-weight: 600 !important;
 	font-style: italic !important;
-	margin: 2px 4px 2px 0 !important;
+	margin: 2px 6px 2px 0 !important;
 }
 
 /* 义项编号 Badge (恢复经典红色圆圈数字 🔴 1, 🔴 2...) */
@@ -954,11 +962,6 @@ footer span {
 	box-shadow: 0 2px 6px rgba(220, 38, 38, 0.35) !important;
 	vertical-align: middle !important;
 }
-	padding: 0 6px !important;
-	margin-right: 8px !important;
-	box-shadow: 0 2px 6px rgba(99, 102, 241, 0.25) !important;
-	vertical-align: middle !important;
-}
 
 /* 义项容器 (取消深色大背景框，改为流式分割) */
 #mdx-resp .sense {
@@ -970,18 +973,22 @@ footer span {
 	box-shadow: none !important;
 }
 
-#mdx-resp .def {
+#mdx-resp .def,
+#mdx-resp .DEF {
 	color: #f8fafc;
+	font-family: var(--font-serif);
 	font-weight: 500;
 }
 
-#mdx-resp .defcn {
+#mdx-resp .defcn,
+#mdx-resp .DEFCN {
 	color: #67e8f9;
-	margin-left: 6px;
+	font-family: var(--font-serif);
+	margin-left: 8px;
 	font-weight: 400;
 }
 
-/* 例句 (彻底消除单个例句的深色重框！改为优雅的缩进与细导线) */
+/* 例句 (优雅的缩进与细导线，统正文中西文字体) */
 #mdx-resp .example {
 	background: transparent !important;
 	border: none !important;
@@ -990,21 +997,37 @@ footer span {
 	padding: 4px 0 4px 12px !important;
 	margin: 8px 0 8px 6px !important;
 	color: #cbd5e1 !important;
-	font-family: var(--font-ui) !important;
+	font-family: var(--font-serif) !important;
 	font-style: normal !important;
 	font-size: 0.95rem !important;
 	box-shadow: none !important;
 }
 
-#mdx-resp .example exaen {
+#mdx-resp .example exaen,
+#mdx-resp .EXAMPLE,
+#mdx-resp .exa {
 	color: #f1f5f9;
+	font-family: var(--font-serif);
 	display: inline;
 	margin-right: 8px;
 }
 
-#mdx-resp expcn {
+#mdx-resp expcn,
+#mdx-resp .expcn,
+#mdx-resp .EXPCN {
 	color: #94a3b8;
+	font-family: var(--font-serif);
 	display: inline;
+}
+
+/* 提高括号注释/解释的亮度和对比度 */
+#mdx-resp .explan,
+#mdx-resp .EXPLAN,
+#mdx-resp .gloss,
+#mdx-resp .GLOSS {
+	color: #94a3b8 !important;
+	font-style: italic !important;
+	margin: 0 4px !important;
 }
 
 /* 快速跳转与菜单按钮 (.popup-button / .chwd a 等) */
