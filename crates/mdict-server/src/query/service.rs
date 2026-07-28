@@ -416,17 +416,16 @@ fn query_aggregate_entries(
         .filter_map(
             |&(file, ref dict_id)| match query_specific_entry(state, file, word, dict_id) {
                 Ok(Some((data, _))) => {
-                    let body = match std::str::from_utf8(&data) {
-                        Ok(text) => text.to_owned(),
-                        Err(_) => String::from_utf8_lossy(&data).into_owned(),
-                    };
+                    // 直接存原始 `Bytes`（Arc 共享、零拷贝）， санitize 推迟到
+                    // `render_aggregate_html` 里一次性完成，避免这里先 `to_owned`
+                    // 成 `String` 再 sanitize 的二道拷贝。
                     let title = state.get_dict_display_name(file);
                     let container_class = state.get_dict_container_class(file);
                     Some(AggregateSection {
                         dict_id: dict_id.clone(),
                         title,
                         container_class,
-                        body,
+                        body: data,
                     })
                 }
                 Ok(None) => None,
@@ -549,11 +548,10 @@ fn is_suggest_candidate(word: &str) -> bool {
     if word.contains('/') || word.contains('\\') || word.contains('<') || word.contains('>') {
         return false;
     }
-    if let Some(first) = word.chars().next() {
-        if first == '-' || first == '.' || first.is_ascii_digit() {
+    if let Some(first) = word.chars().next()
+        && (first == '-' || first == '.' || first.is_ascii_digit()) {
             return false;
         }
-    }
     true
 }
 
@@ -567,11 +565,10 @@ fn calculate_fts_score(prefix: &str, word_lower: &str, word: &str, bm25_score: f
     if word_lower.starts_with(prefix) {
         score += 100;
     }
-    if let Some(ch) = prefix.chars().next() {
-        if word.starts_with(&ch.to_uppercase().to_string()) {
+    if let Some(ch) = prefix.chars().next()
+        && word.starts_with(&ch.to_uppercase().to_string()) {
             score += 20;
         }
-    }
 
     score += 50 - word.len().min(50) as i32;
 

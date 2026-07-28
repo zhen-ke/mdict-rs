@@ -23,15 +23,14 @@ pub fn get_dict_dir() -> PathBuf {
     }
 
     // 2. 尝试二进制同级目录
-    if let Ok(exe_path) = env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
+    if let Ok(exe_path) = env::current_exe()
+        && let Some(exe_dir) = exe_path.parent() {
             let dict_dir = exe_dir.join("mdict");
             if dict_dir.exists() {
                 info!("Using dict dir next to binary: {:?}", dict_dir);
                 return dict_dir;
             }
         }
-    }
 
     // 3. 当前工作目录
     let cwd_dict = PathBuf::from("mdict");
@@ -114,14 +113,13 @@ pub fn scan_dict_files(dict_dir: &Path) -> Vec<PathBuf> {
 /// 3. 开发模式的 resources/static
 pub fn static_path() -> anyhow::Result<PathBuf> {
     // 1. 二进制同级
-    if let Ok(exe_path) = env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
+    if let Ok(exe_path) = env::current_exe()
+        && let Some(exe_dir) = exe_path.parent() {
             let static_dir = exe_dir.join("static");
             if static_dir.exists() {
                 return Ok(static_dir);
             }
         }
-    }
 
     // 2. 当前目录
     let cwd_static = PathBuf::from("static");

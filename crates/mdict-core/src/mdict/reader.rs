@@ -7,7 +7,7 @@ use crate::error::MdictError;
 use crate::mdict::recordblock::record_block_parser;
 use bytes::Bytes;
 use lru::LruCache;
-use memmap2::MmapOptions;
+use memmap2::{Advice, MmapOptions};
 use nom::Parser;
 
 /// 解压后记录块缓存的总字节预算上限。
@@ -15,7 +15,31 @@ use nom::Parser;
 /// block 解压后可达 256 MiB，理论上 64 条可吃满约 16 GiB 内存；改为字节
 /// 预算后峰值被钉死在 `BLOCK_CACHE_BUDGET_BYTES`，与 onedict 的 64 MiB
 /// 对齐。
+/// 单个 `MdxReader` 的 record-block 解压缓存字节预算默认值。
+///
+/// 查询路径是**随机访问题区**（按词定位 → 随机块），内核预读不起作用。
+/// 采用字节预算而非固定条数：单个 record block 解压后可达 256 MiB，历史上
+/// 固定 64 条可吃满 ~16 GiB 内存；改为字节预算后峰值被钉死在本常量。
 const BLOCK_CACHE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+
+/// 跨所有 reader 的 BlockCache 总预算软上限（P4 自适应预算的输入）。
+/// per-reader 预算 = clamp(TOTAL / n_dicts, MIN, MAX)，使多词典部署的总
+/// 缓存内存有界（不会随词典数线性蒸涨）。
+pub const BLOCK_CACHE_TOTAL_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+/// 单 reader 字节预算下限：太少会让热块频繁驱逐、反复解压。
+const BLOCK_CACHE_MIN_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+
+/// 根据“当前词典总数”计算单 reader 的 BlockCache 字节预算。
+///
+/// `n_dicts` = 该 server 进程内实际会加载的词典数（取 max(1, n)）。
+/// 结果 clamp 到 `[BLOCK_CACHE_MIN_BUDGET_BYTES, BLOCK_CACHE_BUDGET_BYTES]`：
+/// 词典少则保持原 64 MiB 上限（单/双词典场景与同口响应一致），词典多则均
+/// 摊总预算，总内存上界 = `TOTAL_BUDGET` 量级。
+pub fn per_reader_cache_budget(n_dicts: usize) -> usize {
+    let n = n_dicts.max(1);
+    (BLOCK_CACHE_TOTAL_BUDGET_BYTES / n)
+        .clamp(BLOCK_CACHE_MIN_BUDGET_BYTES, BLOCK_CACHE_BUDGET_BYTES)
+}
 
 /// 条数兜底上限。
 ///
@@ -102,11 +126,22 @@ pub struct MdxReader {
 
 impl MdxReader {
     pub fn new(path: impl AsRef<Path>) -> Result<Self, MdictError> {
+        Self::with_budget(path, BLOCK_CACHE_BUDGET_BYTES)
+    }
+
+    /// 以显式 BlockCache 字节预算创建 reader。调用方（如 `AppState`）可按
+    /// “词典总数自适应”传 `per_reader_cache_budget(n_dicts)`，从而把多词典
+    /// 部署的总缓存内存钉在 `BLOCK_CACHE_TOTAL_BUDGET_BYTES` 量级、而不是随
+    /// 词典数线性蒸涨。
+    pub fn with_budget(path: impl AsRef<Path>, budget: usize) -> Result<Self, MdictError> {
         let file = File::open(path)?;
         let mmap = unsafe { MmapOptions::new().map(&file)? };
+        // 查询路径是按词定位的随机访问，内核顺序预读会拖低 page-cache 命中。
+        // 告知内核"随机"，抑制预读、不浪费 page cache。
+        let _ = mmap.advise(Advice::Random);
         Ok(Self {
             mmap,
-            block_cache: Mutex::new(BlockCache::new(BLOCK_CACHE_BUDGET_BYTES)),
+            block_cache: Mutex::new(BlockCache::new(budget)),
         })
     }
 

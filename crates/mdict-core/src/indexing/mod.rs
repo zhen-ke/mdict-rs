@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
-use memmap2::MmapOptions;
-use rusqlite::{Connection, ToSql, Transaction, params, params_from_iter};
+use memmap2::{Advice, MmapOptions};
+use rusqlite::{params, params_from_iter, Connection, ToSql, Transaction};
 
 use crate::mdict::mdx::Mdx;
 use tracing::{info, warn};
@@ -149,6 +149,9 @@ pub fn mdx_to_sqlite(file: &Path, fts_enabled: bool) -> anyhow::Result<()> {
     conn.pragma_update(None, "cache_size", "-200000")?; // ~200 MiB
     conn.pragma_update(None, "temp_store", "MEMORY")?;
     let mmap = unsafe { MmapOptions::new().map(&fs::File::open(file)?)? };
+    // 索引构建是顺序扫整个 MDX；告知内核",可激进预读、阅后即弃，
+    // 避免把 page cache 填满并非查询热区页。
+    let _ = mmap.advise(Advice::Sequential);
     let mdx = Mdx::new(&mmap)?;
 
     // Schema: create the *data* tables first (MDX_INDEX, MDX_META, MDX_FTS),
@@ -209,8 +212,12 @@ pub fn mdx_to_sqlite(file: &Path, fts_enabled: bool) -> anyhow::Result<()> {
 
     // 分块多行批量插入：每块以单条多 VALUES 语句写入，减少 SQLite 调用与解析
     // 轮次（相对逐行 prepared execute 可量级下降）。块大小受 SQLite 变量数
-    // 上限（旧版 999）制约：100×7=700 < 999，安全。
-    const INSERT_CHUNK: usize = 100;
+    // 上限制约：现代 bundled SQLite 的 `SQLITE_MAX_VARIABLE_NUMBER=32766`，
+    // 故取 4000×7=28000 < 32766，把单条多 VALUES 的仸载吃到 ~85%，
+    // 相比族的 100×7=700（仅 2%），建索引轮次/解析次数降一个量级。即便
+    // 运行在 `MAX_VARIABLE_NUMBER=999` 的旧版上超限，`flush_index_chunk` 会以
+    // 原生 SQLite 错误指出，可опат减回退。
+    const INSERT_CHUNK: usize = 4000;
     let mut chunk: Vec<(String, Option<String>, i64, i64, i64, i64, i64)> =
         Vec::with_capacity(INSERT_CHUNK);
     let mut fts_chunk: Vec<String> = Vec::with_capacity(INSERT_CHUNK);

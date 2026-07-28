@@ -70,11 +70,10 @@ fn pick_random_word(conn: &Connection) -> Option<String> {
             [rand_id],
             |row| row.get(0),
         );
-        if let Ok(word) = result {
-            if is_displayable_word(&word) {
+        if let Ok(word) = result
+            && is_displayable_word(&word) {
                 return Some(word);
             }
-        }
     }
     None
 }

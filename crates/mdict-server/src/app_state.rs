@@ -12,12 +12,32 @@ use rusqlite::OpenFlags;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::config::{DictConfig, DictInfo};
-use mdict_core::mdict::reader::MdxReader;
+use mdict_core::mdict::reader::{per_reader_cache_budget, MdxReader};
 
-const ENTRY_CACHE_SIZE: u64 = 256;
-const RESOURCE_CACHE_SIZE: u64 = 1024;
+/// Entry cache 的字节预算上限。moka 的 `max_capacity` 配合 `weigher` 后语义是
+/// “所有缓存项的 weight 之和 ≤ max_capacity”，故这里把 `data.len()` 作为 weight，
+/// 整个 entry cache 的内存峰值被钉死在这个量级，与单个聚合页大小无关。
+const ENTRY_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+/// Resource cache 的字节预算上限（音频/图片/css…），按字节封顶。
+const RESOURCE_CACHE_BYTES: u64 = 128 * 1024 * 1024;
+/// 条目式兜底容量（moka 同时受 `max_capacity` 与 `weigher` 双重约束，取最小）。
+const RESOURCE_CACHE_MAX_ENTRIES: u64 = 4096;
 const NEGATIVE_CACHE_SIZE: u64 = 1024;
+/// 阻塞查询并发的硬上界（也作为 `available_parallelism` 取不到值时的兑回路值）。
+///
+/// 实际默认值在运行时自适应为 `min(64, max(8, n_cpus))`——见
+/// [`runtime_max_concurrent_blocking_queries`]，使「请求并发与单请求 rayon 并行」
+/// 矩阵更均衡，避免超额并发掘起过多的 blocking 线程轮转开销。仍可被环境变量
+/// `MDICT_MAX_CONCURRENT_BLOCKING_QUERIES` 显式覆盖。
 const DEFAULT_MAX_CONCURRENT_BLOCKING_QUERIES: usize = 64;
+
+/// 运行时计算的自适配并发上限：`min(64, max(8, n_cpus))`。
+fn runtime_max_concurrent_blocking_queries() -> usize {
+    let n = std::thread::available_parallelism()
+        .map(|v| v.get())
+        .unwrap_or(DEFAULT_MAX_CONCURRENT_BLOCKING_QUERIES);
+    n.clamp(8, DEFAULT_MAX_CONCURRENT_BLOCKING_QUERIES)
+}
 const ENTRY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const RESOURCE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(20);
@@ -25,7 +45,10 @@ const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(20);
 #[derive(Clone)]
 struct CachedPayload {
     data: Bytes,
-    content_type: String,
+    /// `Arc<str>` 让缓存命中路径（`get_*_cached` 返回给 handler）只做一次
+    /// arc 引用计数加，而不是 `String` 的堆分配+拷贝。content_type 通常是
+    /// `"text/html"`/`"image/png"` 这类短串，跨条目大量共享，arc clone 廉价。
+    content_type: Arc<str>,
 }
 
 struct DictCatalog {
@@ -128,12 +151,19 @@ impl RuntimeState {
             mdx_readers: RwLock::new(HashMap::new()),
             blocking_query_slots: Arc::new(Semaphore::new(max_concurrent_blocking_queries)),
             entry_cache: Cache::builder()
-                .max_capacity(ENTRY_CACHE_SIZE)
+                // 按字节封顶：每项的 weight = data.len()，几条巨型聚合页也不会
+                // 让 entry cache 漂出 ENTRY_CACHE_BYTES。
+                .max_capacity(ENTRY_CACHE_BYTES)
+                .weigher(|_k, v: &CachedPayload| u32::try_from(v.data.len()).unwrap_or(u32::MAX))
                 .time_to_live(ENTRY_CACHE_TTL)
                 .build(),
             resource_cache: Cache::builder()
-                .max_capacity(RESOURCE_CACHE_SIZE)
+                .max_capacity(RESOURCE_CACHE_BYTES)
+                // 字节预算是真正的约束；同时再设一个条目数上限，防止海量极小
+                // 资源（icon/小字体）把条数推到无界（moka 取两约束的较小值）。
+                .weigher(|_k, v: &CachedPayload| u32::try_from(v.data.len()).unwrap_or(u32::MAX))
                 .time_to_live(RESOURCE_CACHE_TTL)
+                .max_capacity(RESOURCE_CACHE_MAX_ENTRIES)
                 .build(),
             negative_cache: Cache::builder()
                 .max_capacity(NEGATIVE_CACHE_SIZE)
@@ -153,12 +183,13 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(dict_dir: PathBuf, static_dir: PathBuf, dict_files: Vec<PathBuf>) -> Self {
+        // 显式环境变量优先；未设时走运行时自适配（≈ CPU 并行度，clamped 8..64）。
         let max_concurrent_blocking_queries =
             std::env::var("MDICT_MAX_CONCURRENT_BLOCKING_QUERIES")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
                 .filter(|v| *v > 0)
-                .unwrap_or(DEFAULT_MAX_CONCURRENT_BLOCKING_QUERIES);
+                .unwrap_or_else(runtime_max_concurrent_blocking_queries);
 
         let catalog = DictCatalog::from_dict_files(&dict_files);
         let runtime = RuntimeState::new(max_concurrent_blocking_queries);
@@ -359,7 +390,11 @@ impl AppState {
             return Ok(reader);
         }
 
-        let reader = Arc::new(MdxReader::new(&dict_file)?);
+        // P4: 按“当前词典总数”自适应 per-reader BlockCache 预算——词典多时
+        // 均摊 `BLOCK_CACHE_TOTAL_BUDGET_BYTES`、词典少时保持原 64 MiB。
+        // 字典在启动时一次扫描，后续不变，故以 dict_id_map 的词表状况为准。
+        let budget = per_reader_cache_budget(self.catalog.dict_id_map.len().max(1));
+        let reader = Arc::new(MdxReader::with_budget(&dict_file, budget)?);
         let entry = {
             let mut guard = self
                 .runtime
@@ -371,7 +406,7 @@ impl AppState {
         Ok(entry)
     }
 
-    pub fn get_entry_cached(&self, key: &str) -> Option<(Bytes, String)> {
+    pub fn get_entry_cached(&self, key: &str) -> Option<(Bytes, Arc<str>)> {
         self.runtime
             .entry_cache
             .get(key)
@@ -379,12 +414,16 @@ impl AppState {
     }
 
     pub fn put_entry_cached(&self, key: String, data: Bytes, content_type: String) {
-        self.runtime
-            .entry_cache
-            .insert(key, CachedPayload { data, content_type });
+        self.runtime.entry_cache.insert(
+            key,
+            CachedPayload {
+                data,
+                content_type: Arc::from(content_type),
+            },
+        );
     }
 
-    pub fn get_resource_cached(&self, key: &str) -> Option<(Bytes, String)> {
+    pub fn get_resource_cached(&self, key: &str) -> Option<(Bytes, Arc<str>)> {
         self.runtime
             .resource_cache
             .get(key)
@@ -392,9 +431,13 @@ impl AppState {
     }
 
     pub fn put_resource_cached(&self, key: String, data: Bytes, content_type: String) {
-        self.runtime
-            .resource_cache
-            .insert(key, CachedPayload { data, content_type });
+        self.runtime.resource_cache.insert(
+            key,
+            CachedPayload {
+                data,
+                content_type: Arc::from(content_type),
+            },
+        );
     }
 
     pub fn is_negative_cached(&self, key: &str) -> bool {
