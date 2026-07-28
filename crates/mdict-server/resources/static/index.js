@@ -71,6 +71,9 @@ function toggleSection($section) {
  *   4. 绑定点击事件
  */
 function enhanceAggregateResult() {
+	// 无论有几本词典，均初始化词典内部折叠（数字序号例句折叠、知识框折叠、词头折叠等）
+	initLM6Content();
+
 	const $aggregate = $("#mdx-resp .mdict-aggregate");
 	if ($aggregate.length === 0) {
 		teardownDictNavObserver();
@@ -163,6 +166,29 @@ function enhanceAggregateResult() {
 
 	// 3. 启动滚动观察，高亮当前可见词典对应的 nav pill
 	setupDictNavObserver();
+
+	// 4. 初始化词典内容折叠与内置逻辑 (数字序号例句折叠、知识框折叠等)
+	initLM6Content();
+}
+
+/**
+ * 初始化词典内置交互 (音节整理、例句折叠、知识框折叠、数字序号例句展开等)
+ */
+function initLM6Content() {
+	if (window.d8018d6852bc49e3b3e655364cf1439c) {
+		try {
+			const lm6 = window.d8018d6852bc49e3b3e655364cf1439c;
+			lm6.processContent();
+			lm6.initBoxToggle();
+			lm6.initHyphenationToggle();
+			lm6.initSquareToggle();
+			lm6.initSensenumToggle();
+			lm6.initDerivToggle();
+			lm6.initHoverEffects();
+		} catch (err) {
+			console.warn("lm6 init error:", err);
+		}
+	}
 }
 
 /**
@@ -1014,27 +1040,50 @@ function validInput(word) {
 // =============================================
 // 联想词功能
 // =============================================
+// 联想词功能
+// =============================================
 function showSuggestions(suggestions) {
 	const $list = $("#suggestions");
 	$list.empty();
 	hideHistoryDropdown();
 
-	if (suggestions.length === 0) {
+	if (!suggestions || suggestions.length === 0) {
 		$list.hide();
 		return;
 	}
 
+	const query = $("#word").val().trim().toLowerCase();
+
 	suggestions.forEach((word, index) => {
-		// 高亮匹配部分
-		const query = $("#word").val().trim().toLowerCase();
-		let displayWord = word;
+		const safeWord = $("<div>").text(word).html();
+		let displayWord = safeWord;
 		if (word.toLowerCase().startsWith(query)) {
-			displayWord = `<strong>${word.substring(0, query.length)}</strong>${word.substring(query.length)}`;
+			const matched = $("<div>").text(word.substring(0, query.length)).html();
+			const rest = $("<div>").text(word.substring(query.length)).html();
+			displayWord = `<strong class="sug-match">${matched}</strong><span class="sug-rest">${rest}</span>`;
+		} else {
+			displayWord = `<span class="sug-rest">${safeWord}</span>`;
 		}
-		$list.append(
-			$("<li>").html(displayWord).data("word", word).data("index", index),
-		);
+
+		const $li = $('<li class="sug-item">')
+			.attr("data-word", word)
+			.attr("data-index", index)
+			.html(`
+				<svg class="sug-icon icon"><use href="#icon-search"/></svg>
+				<span class="sug-text">${displayWord}</span>
+				<span class="sug-arrow">↵</span>
+			`);
+
+		$list.append($li);
 	});
+
+	$list.append(`
+		<li class="sug-footer" aria-hidden="true">
+			<span><kbd>↑</kbd><kbd>↓</kbd> 移动</span>
+			<span><kbd>↵</kbd> 查询</span>
+			<span><kbd>Esc</kbd> 关闭</span>
+		</li>
+	`);
 
 	selectedIndex = -1;
 	$list.show();
@@ -1046,12 +1095,15 @@ function hideSuggestions() {
 }
 
 function selectSuggestion(index) {
-	const $items = $("#suggestions li");
+	const $items = $("#suggestions li.sug-item");
 	$items.removeClass("selected");
 
 	if (index >= 0 && index < $items.length) {
-		$items.eq(index).addClass("selected");
+		const $selected = $items.eq(index);
+		$selected.addClass("selected");
 		selectedIndex = index;
+		const el = $selected[0];
+		if (el) el.scrollIntoView({ block: "nearest" });
 	} else {
 		selectedIndex = -1;
 	}
@@ -1061,6 +1113,12 @@ function selectSuggestion(index) {
 $(document).on("input", "#word", function () {
 	const query = $(this).val().trim();
 	hideHistoryDropdown();
+
+	if (query.length > 0) {
+		$("#clear-input-btn").show();
+	} else {
+		$("#clear-input-btn").hide();
+	}
 
 	if (suggestTimer) {
 		clearTimeout(suggestTimer);
@@ -1095,12 +1153,31 @@ $(document).on("input", "#word", function () {
 	}, CONFIG.DEBOUNCE_MS);
 });
 
-// 点击建议项
-$(document).on("click", "#suggestions li", function () {
-	const word = $(this).data("word");
-	$("#word").val(word);
+// 清空按钮点击
+$(document).on("click", "#clear-input-btn", function (e) {
+	e.stopPropagation();
+	$("#word").val("").focus();
+	$(this).hide();
 	hideSuggestions();
-	queryMdx(word);
+	showHistoryDropdown();
+});
+
+// 鼠标悬停建议项时高亮
+$(document).on("mouseenter", "#suggestions li.sug-item", function () {
+	const idx = $(this).index();
+	selectSuggestion(idx);
+});
+
+// 点击建议项
+$(document).on("click", "#suggestions li.sug-item", function (e) {
+	e.preventDefault();
+	e.stopPropagation();
+	const word = $(this).attr("data-word");
+	if (word) {
+		$("#word").val(word);
+		hideSuggestions();
+		queryMdx(word);
+	}
 });
 
 // 点击其他地方隐藏下拉框
@@ -1115,30 +1192,38 @@ $(document).on("click", (e) => {
 // 键盘事件
 // =============================================
 $(document).on("keydown", "#word", (e) => {
-	const $items = $("#suggestions li");
+	const $items = $("#suggestions li.sug-item");
 	const isVisible = $("#suggestions").is(":visible");
 
 	if (e.keyCode === 13) {
 		// Enter
 		e.preventDefault();
 		hideHistoryDropdown();
-		if (isVisible && selectedIndex >= 0) {
-			const word = $items.eq(selectedIndex).data("word");
-			$("#word").val(word);
-			hideSuggestions();
-			queryMdx(word);
-		} else {
-			hideSuggestions();
-			postQuery();
+		if (isVisible && selectedIndex >= 0 && selectedIndex < $items.length) {
+			const word = $items.eq(selectedIndex).attr("data-word");
+			if (word) {
+				$("#word").val(word);
+				hideSuggestions();
+				queryMdx(word);
+				return;
+			}
 		}
+		hideSuggestions();
+		postQuery();
 	} else if (e.keyCode === 40 && isVisible) {
 		// Down
 		e.preventDefault();
-		selectSuggestion(Math.min(selectedIndex + 1, $items.length - 1));
+		if ($items.length > 0) {
+			const next = selectedIndex < $items.length - 1 ? selectedIndex + 1 : 0;
+			selectSuggestion(next);
+		}
 	} else if (e.keyCode === 38 && isVisible) {
 		// Up
 		e.preventDefault();
-		selectSuggestion(Math.max(selectedIndex - 1, 0));
+		if ($items.length > 0) {
+			const prev = selectedIndex > 0 ? selectedIndex - 1 : $items.length - 1;
+			selectSuggestion(prev);
+		}
 	} else if (e.keyCode === 27) {
 		// Escape
 		hideSuggestions();

@@ -4,8 +4,9 @@
     <meta charset="UTF-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
     <meta name="description" content="MDX 极速词典 - Rust + SQLite 驱动，极致轻量高效"/>
-    <meta name="theme-color" content="#0f172a"/>
+    <meta name="theme-color" content="#0b0f19"/>
     <script src="jquery.min.js"></script>
+    <script src="lm6.js"></script>
     <script src="index.js"></script>
     <link rel="stylesheet" type="text/css" href="index.css"/>
     <link rel="stylesheet" type="text/css" href="lm6.css"/>
@@ -34,14 +35,18 @@
 
         <div class="search-container">
             <div class="search-box" id="search-wrapper">
-                <input
-                    type="text"
-                    id="word"
-                    name="word"
-                    class="search-input"
-                    placeholder="输入要查询的单词..."
-                    autocomplete="off"
-                />
+                <div class="search-input-wrapper">
+                    <svg class="search-input-icon icon"><use href="#icon-search"/></svg>
+                    <input
+                        type="text"
+                        id="word"
+                        name="word"
+                        class="search-input"
+                        placeholder="输入要查询的单词..."
+                        autocomplete="off"
+                    />
+                    <button type="button" id="clear-input-btn" class="clear-input-btn" title="清空输入" style="display:none;">&times;</button>
+                </div>
                 <button id="lucky-btn" class="search-btn">查询</button>
                 <ul id="suggestions"></ul>
             </div>
