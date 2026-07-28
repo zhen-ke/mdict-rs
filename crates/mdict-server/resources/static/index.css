@@ -884,22 +884,6 @@ footer span {
 	box-shadow: none !important;
 }
 
-/* 主词头 Headword - 去除红框，改为庄重大字号标题 */
-#mdx-resp .hyphenation,
-#mdx-resp .orthvar,
-#mdx-resp .phrvbhwd,
-#mdx-resp .frequent {
-	background: none !important;
-	border: none !important;
-	color: #ffffff !important;
-	font-size: 1.5rem !important;
-	font-weight: 700 !important;
-	font-family: var(--font-serif) !important;
-	line-height: 1.3 !important;
-	display: inline-block !important;
-	margin-right: 8px !important;
-}
-
 /* 释义内部的引用词 (如 clause) - 恢复经典的红字加粗 */
 #mdx-resp .refhwd {
 	background: none !important;
