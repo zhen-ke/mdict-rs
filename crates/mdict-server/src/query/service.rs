@@ -8,6 +8,7 @@ use tracing::{debug, info, warn};
 
 use crate::app_state::AppState;
 
+use mdict_core::fuzzy::{FuzzySuggestion, fuzzy_suggest as fuzzy_suggest_one};
 use mdict_core::presenter::{AggregateSection, render_aggregate_html};
 
 use super::canonical_normalize;
@@ -93,6 +94,8 @@ fn filter_dict_files<'a>(
             .collect(),
     }
 }
+
+const FUZZY_MAX_DIST: usize = 2;
 
 /// 返回以指定前缀开头的词条列表（用于搜索建议）
 /// 使用 FTS5 + bm25 排序
@@ -224,6 +227,75 @@ pub fn suggest(
         .take(limit)
         .map(|(word, _)| word)
         .collect())
+}
+
+/// 编辑距离近邻建议（did-you-mean）：当 `/query` 未命中时调用，
+/// 返回与查询词编辑距离 ≤ 2 的词条。跨词典并行执行，以每个词的“最小距离”
+/// 合并，再按 (距离升序, 词长升序, 字典序) 排序、去重、截取前 `limit` 条。
+///
+/// 仅复用 `mdict_core::fuzzy::fuzzy_suggest`（背后是既有 `idx_mdx_normalized`
+/// 覆盖索引的首字符区间 + 长度窗预筛 + 早停 Levenshtein + `CANDIDATE_CAP`），
+/// 不改动任何查询/索引 schema。
+///
+/// When `filter` is `Some`, only dictionaries whose id is in the set are searched.
+pub fn fuzzy_suggest(
+    state: &AppState,
+    word: String,
+    limit: usize,
+    filter: &DictFilter,
+) -> Result<Vec<String>, QueryError> {
+    let trimmed = word.trim();
+    if trimmed.is_empty() || limit == 0 {
+        return Ok(vec![]);
+    }
+    // 过短的词 fuzzy 匹配噪声太大且无意义（单字所有词均距离 ≤ 1）。
+    if trimmed.chars().count() < 2 {
+        return Ok(vec![]);
+    }
+
+    let dict_files = filter_dict_files(state.dict_text_files(), state, filter);
+    // 每个词典独立返回 (词, 最小距离)。
+    let per_dict: Vec<Vec<(String, usize)>> = dict_files
+        .par_iter()
+        .map(|file| {
+            let conn = match state.get_db_connection(file) {
+                Ok(c) => c,
+                Err(e) => {
+                    debug!("fuzzy skip dict {:?}: {}", file, e);
+                    return vec![];
+                }
+            };
+            match fuzzy_suggest_one(&conn, trimmed, FUZZY_MAX_DIST, limit * 3) {
+                Ok(hits) => hits
+                    .into_iter()
+                    .map(|FuzzySuggestion { distance, word }| (word, distance))
+                    .collect(),
+                Err(e) => {
+                    warn!("fuzzy query failed for {:?}: {}", file, e);
+                    vec![]
+                }
+            }
+        })
+        .collect();
+
+    // 跨词典合并：同一词取最小距离。
+    let mut best: HashMap<String, usize> = HashMap::new();
+    for hits in per_dict {
+        for (word, dist) in hits {
+            best.entry(word)
+                .and_modify(|d| *d = (*d).min(dist))
+                .or_insert(dist);
+        }
+    }
+
+    let mut scored: Vec<(usize, String)> = best.into_iter().map(|(w, d)| (d, w)).collect();
+    scored.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.len().cmp(&b.1.len()))
+            .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+    });
+
+    Ok(scored.into_iter().take(limit).map(|(_, w)| w).collect())
 }
 
 fn query_internal(

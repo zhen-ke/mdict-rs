@@ -3,7 +3,7 @@ use crate::config::{DictConfig, get_dict_dir, scan_dict_files, static_path};
 use crate::handlers::{
     handle_dict_audio, handle_dict_entry, handle_dict_list, handle_dict_res, handle_dict_resource,
     handle_dict_script, handle_dict_style, handle_index_status, handle_lucky, handle_query,
-    handle_resource, handle_suggest, handle_trace,
+    handle_resource, handle_suggest, handle_suggest_fuzzy, handle_trace,
 };
 use mdict_core::indexing::{IndexJob, db_path, indexing};
 
@@ -83,6 +83,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let app = Router::new()
         .route("/query", post(handle_query))
         .route("/suggest", get(handle_suggest))
+        .route("/suggest/fuzzy", get(handle_suggest_fuzzy))
         .route("/lucky", get(handle_lucky))
         .route("/trace", get(handle_trace))
         // Dictionary config API

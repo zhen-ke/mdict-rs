@@ -141,5 +141,31 @@ fn bench_prefix_scan(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_normalized_exact, bench_prefix_scan);
+/// Phase 4 回归门禁：did-you-mean fuzzy 建议在 1M 词条下的端到端延迟。
+///
+/// 丈量 `mdict_core::fuzzy::fuzzy_suggest` 的完整热路径——首字符区间 + 长度窗
+/// 预筛（在 `idx_mdx_normalized` 覆盖索引上 LIMIT CANDIDATE_CAP 扫描）→
+/// 对 ≈4000 候选跑早停 Levenshtein → 排序去重。门禁基线：≤2 编辑距离 /
+/// 1M 词条 < 50ms。
+///
+/// 输入 "entry000501" 是 "entry000500" 的距离-1 近邻，长度 12，首个 'e'；
+/// bench DB 全部 1M 行同首字母 'e'、同长度 11，是“最坏稠密前缀”场景——
+/// 预筛不再省力、直接撞 `CANDIDATE_CAP`，仍应远低于门禁。
+fn bench_fuzzy_suggest(c: &mut Criterion) {
+    c.bench_function("fuzzy_suggest_1m", |b| {
+        b.iter(|| {
+            let conn = db().lock().unwrap();
+            let hits = mdict_core::fuzzy::fuzzy_suggest(&conn, black_box("entry000501"), 2, 10)
+                .expect("fuzzy_suggest");
+            black_box(hits);
+        });
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_normalized_exact,
+    bench_prefix_scan,
+    bench_fuzzy_suggest
+);
 criterion_main!(benches);

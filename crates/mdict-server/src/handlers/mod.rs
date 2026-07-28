@@ -11,8 +11,8 @@ use crate::app_state::AppState;
 use crate::config::DictInfo;
 use crate::lucky;
 use crate::query::{
-    DictFilter, QueryError, query, query_aggregate, query_specific_entry, query_specific_resource,
-    query_with_trace, suggest,
+    DictFilter, QueryError, fuzzy_suggest, query, query_aggregate, query_specific_entry,
+    query_specific_resource, query_with_trace, suggest,
 };
 use mdict_core::indexing::index_status;
 use serde_derive::{Deserialize, Serialize};
@@ -148,6 +148,37 @@ pub(crate) async fn handle_suggest(
         Ok(suggestions) => Ok(Json(suggestions)),
         Err(e) => {
             tracing::warn!("Suggest failed: {}", e);
+            Ok(Json(vec![]))
+        }
+    }
+}
+
+/// GET /suggest/fuzzy?q=...&dicts=... — did-you-mean 近邻建议。
+///
+/// `/query` 未命中时由前端调用，返回与查询词编辑距离 ≤ 2 的词条。跨词典
+/// 并行执行（rayon）后按最小距离合并、排序、去重，最多 10 条。
+pub(crate) async fn handle_suggest_fuzzy(
+    State(state): State<AppState>,
+    Query(params): Query<SuggestQuery>,
+) -> Result<Json<Vec<String>>, AppError> {
+    let q = params.q;
+    let filter = parse_dict_filter(&params.dicts);
+    let result = match spawn_blocking_query(&state, "fuzzy suggest", move |task_state| {
+        fuzzy_suggest(&task_state, q, 10, &filter)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(AppError::Overloaded) => return Err(AppError::Overloaded),
+        Err(e) => {
+            tracing::warn!("Fuzzy suggest task failed: {}", e);
+            return Ok(Json(vec![]));
+        }
+    };
+    match result {
+        Ok(suggestions) => Ok(Json(suggestions)),
+        Err(e) => {
+            tracing::warn!("Fuzzy suggest failed: {}", e);
             Ok(Json(vec![]))
         }
     }

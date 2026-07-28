@@ -7,12 +7,14 @@
 //! 模块划分：
 //! - [`mdict`]      — MDX/MDD 容器解析与 mmap 记录读取
 //! - [`indexing`]   — 词典文件 → SQLite 索引库（`<file>.db`）
-//! - [`normalize`]  — 查询词归一化与词形候选展开
-//! - [`rewrite`]    — 词条 HTML 中资源/词条链接的路由重写
+//! - [`normalize`]  - 查询词归一化与词形候选展开
+//! - [`fuzzy`]     - 编辑距离近邻建议（did-you-mean）
+//! - [`rewrite`]    - 词条 HTML 中资源/词条链接的路由重写
 //! - [`presenter`]  — 多词典聚合 HTML 渲染与安全清洗
 //! - [`util`]       — 加解密与基础解析工具
 
 pub mod error;
+pub mod fuzzy;
 pub mod indexing;
 pub mod mdict;
 pub mod normalize;
