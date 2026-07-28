@@ -30,5 +30,7 @@ RUN mkdir -p /app/mdict
 EXPOSE 8181
 
 ENV MDX_DICT_DIR=/app/mdict
+ENV BIND_ADDR=0.0.0.0
+ENV PORT=8181
 
 CMD ["/app/mdict-rs"]
