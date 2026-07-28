@@ -943,6 +943,16 @@ footer span {
 	margin: 2px 6px 2px 0 !important;
 }
 
+#mdx-resp .registerlab,
+#mdx-resp .REGISTERLAB,
+#mdx-resp .prop,
+#mdx-resp .PROP,
+#mdx-resp .gram,
+#mdx-resp .GRAM {
+	margin-right: 6px !important;
+	display: inline-block !important;
+}
+
 /* 义项编号 Badge (恢复经典红色圆圈数字 🔴 1, 🔴 2...) */
 #mdx-resp .sensenum,
 #mdx-resp span.sensenum {
