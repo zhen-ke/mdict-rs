@@ -10,9 +10,11 @@
 //! - [`normalize`]  - 查询词归一化与词形候选展开
 //! - [`fuzzy`]     - 编辑距离近邻建议（did-you-mean）
 //! - [`rewrite`]    - 词条 HTML 中资源/词条链接的路由重写
+//! - [`css_scope`]  — 词典自带 CSS 的按词典作用域重写（防串染）
 //! - [`presenter`]  — 多词典聚合 HTML 渲染与安全清洗
 //! - [`util`]       — 加解密与基础解析工具
 
+pub mod css_scope;
 pub mod error;
 pub mod fuzzy;
 pub mod indexing;

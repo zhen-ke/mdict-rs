@@ -14,7 +14,9 @@ use crate::query::{
     DictFilter, QueryError, fuzzy_suggest, query, query_aggregate, query_specific_entry,
     query_specific_resource, query_with_trace, suggest,
 };
+use mdict_core::css_scope::scope_css;
 use mdict_core::indexing::index_status;
+use mdict_core::rewrite::rewrite_css_urls;
 use serde_derive::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path as FsPath, PathBuf};
@@ -454,6 +456,10 @@ async fn query_dict_resource(
         };
 
         if let Some((data, content_type)) = result {
+            // CSS is scoped per-dict *before* caching so the cache stores
+            // already-scoped bytes and cache hits return them verbatim (scope_css
+            // is not idempotent — re-scoping would double-prefix selectors).
+            let data = scope_dict_css_if_css(&dict_id, data, &content_type);
             if should_cache_resource(&content_type, data.len()) {
                 state.put_resource_cached(cache_key, data.clone(), content_type.clone());
             }
@@ -471,8 +477,12 @@ async fn query_dict_resource(
     if let Some(static_file) = resolve_static_file(state.static_dir(), &path, false).await {
         if should_cache_resource(&static_file.content_type, static_file.size) {
             match fs::read(&static_file.path).await {
-                Ok(data) => {
-                    let data = Bytes::from(data);
+                Ok(read) => {
+                    let data = scope_dict_css_if_css(
+                        &dict_id,
+                        Bytes::from(read),
+                        &static_file.content_type,
+                    );
                     state.put_resource_cached(
                         cache_key,
                         data.clone(),
@@ -504,6 +514,50 @@ async fn query_dict_resource(
 
     state.put_negative_cache(negative_key);
     not_found()
+}
+
+/// Build the CSS scope selector for a dictionary section's body.
+///
+/// Dictionary-bundled CSS served from `/dict/{id}/res/*.css` is rewritten so
+/// every top-level style-rule selector is prefixed with this scope, preventing
+/// leakage into the app shell and sibling dictionary sections. The selector
+/// matches the `[data-dict-id="…"] .mdict-dict-body` wrapper emitted by
+/// [`mdict_core::presenter::render_aggregate_html`].
+///
+/// `@media` / `@supports` / `@container` blocks recurse (inner rules scoped);
+/// global at-rules (`@font-face`, `@keyframes`, `@page`, …) and statement
+/// at-rules (`@import`, `@charset`, `@namespace`) pass through untouched.
+fn dict_css_scope(dict_id: &str) -> String {
+    // Escape backslash and double-quote for safe embedding inside a CSS
+    // attribute-selector quoted value. dict_ids are normally plain slugs, but
+    // this keeps the selector well-formed for arbitrary identifiers.
+    let escaped = dict_id.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("[data-dict-id=\"{}\"] .mdict-dict-body", escaped)
+}
+
+/// If `content_type` is CSS, return `data` with every top-level selector
+/// scoped under the per-dictionary scope *and* every `url(...)` reference
+/// rewritten to this dict's `/dict/{id}/res/...` route; otherwise return
+/// `data` unchanged. Non-UTF-8 CSS (effectively unheard of) is left untouched
+/// rather than risk a lossy rewrite.
+///
+/// Both transforms run exactly once, before the bytes enter the resource
+/// cache, so cache hits return already-scoped + already-rewritten bytes
+/// verbatim. Neither transform is idempotent on its own output (re-scoping
+/// would double-prefix selectors; re-rewriting a `/dict/...` url would
+/// re-root it), so we never call this on already-processed bytes — the
+/// raw MDD CSS only ever contains relative `url()` references.
+fn scope_dict_css_if_css(dict_id: &str, data: Bytes, content_type: &str) -> Bytes {
+    if !content_type.starts_with("text/css") {
+        return data;
+    }
+    match std::str::from_utf8(&data) {
+        Ok(css) => {
+            let scoped = scope_css(css, &dict_css_scope(dict_id));
+            Bytes::from(rewrite_css_urls(&scoped, dict_id))
+        }
+        Err(_) => data,
+    }
 }
 
 fn build_resource_candidates(path: &str) -> Vec<String> {
@@ -596,11 +650,11 @@ async fn resolve_static_file(
     if let (Ok(canonical), Ok(base_canonical)) = (
         fs::canonicalize(&static_file).await,
         fs::canonicalize(base_static_dir).await,
-    )
-        && !canonical.starts_with(&base_canonical) {
-            tracing::warn!("Path escape attempt blocked: {:?}", static_file);
-            return None;
-        }
+    ) && !canonical.starts_with(&base_canonical)
+    {
+        tracing::warn!("Path escape attempt blocked: {:?}", static_file);
+        return None;
+    }
 
     let metadata = match fs::metadata(&static_file).await {
         Ok(meta) if meta.is_file() => meta,
