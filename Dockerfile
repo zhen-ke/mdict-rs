@@ -7,7 +7,7 @@ WORKDIR /usr/src/app
 RUN apk add --no-cache musl-dev gcc pkgconfig
 
 # 复制源码并编译
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.loc[k] ./
 COPY crates ./crates
 
 RUN cargo build --release -p mdict-rs
