@@ -77,10 +77,10 @@ pub fn fuzzy_suggest(
                    AND length(normalized) BETWEEN ?3 AND ?4
                  LIMIT ?5",
             )?;
-            stmt.query_map(params![first, hi, lo_len, hi_len, CANDIDATE_CAP], |r| {
+            let rows = stmt.query_map(params![first, hi, lo_len, hi_len, CANDIDATE_CAP], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
         }
         None => {
             // 首字符已是最大码点（极端退化）：退化为 >= lo 的半开扫描。
@@ -91,10 +91,10 @@ pub fn fuzzy_suggest(
                    AND length(normalized) BETWEEN ?2 AND ?3
                  LIMIT ?4",
             )?;
-            stmt.query_map(params![first, lo_len, hi_len, CANDIDATE_CAP], |r| {
+            let rows = stmt.query_map(params![first, lo_len, hi_len, CANDIDATE_CAP], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
         }
     };
 
