@@ -18,7 +18,7 @@ adler32 = "1"
 rusqlite = { version = "0.37", features = ["bundled"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.31"
-rand = "0.9"
+rand = "0.10"
 ripemd = "0.1"
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
