@@ -105,11 +105,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(8181u16);
-    let host = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let host = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".to_string());
     let addr = format!("{}:{}", host, port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-    info!("app serve on http://{}:{}", host, port);
+    let display_host = if host == "0.0.0.0" { "127.0.0.1" } else { &host };
+    info!("app serve on http://{}:{}", display_host, port);
 
     axum::serve(listener, app).await?;
 
