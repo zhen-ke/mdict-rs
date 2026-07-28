@@ -3,15 +3,25 @@
    ============================================= */
 
 :root {
-	/* 字体系统 */
+	/* 字体系统 (专业词典排版架构) */
 	--font-ui:
-		-apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
-		"Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+		"SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+		"Helvetica Neue", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
 		sans-serif;
+	--font-headword:
+		"Charter", "SF Pro Display", -apple-system, "Segoe UI", "PingFang SC",
+		"Microsoft YaHei", sans-serif;
 	--font-serif:
-		"Charter", "Georgia", "Cambria", "Times New Roman", "Noto Serif SC",
-		"Source Serif Pro", serif;
-	--font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+		"Charter", "Source Serif 4", "Source Serif Pro", "Georgia",
+		"Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", serif;
+	--font-phonetic:
+		"Charis SIL", "Doulos SIL", "Gentium Plus", "Lucida Sans Unicode",
+		"DejaVu Sans", "Segoe UI", "Arial", sans-serif;
+	--font-example:
+		"Georgia-Italic", "Charter", "Noto Serif SC", serif;
+	--font-mono:
+		ui-monospace, "SF Mono", Monaco, Menlo, Consolas, "Liberation Mono",
+		monospace;
 
 	/* 配色系统 */
 	--primary: #6366f1;
@@ -906,8 +916,7 @@ footer span {
 /* 音标 (IPA) */
 #mdx-resp .pron {
 	color: #38bdf8 !important;
-	font-family:
-		"Lucida Sans Unicode", "Segoe UI Symbol", "DejaVu Sans", sans-serif !important;
+	font-family: var(--font-phonetic) !important;
 	font-size: 0.95rem !important;
 	margin: 0 4px;
 }
