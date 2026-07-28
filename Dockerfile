@@ -20,9 +20,9 @@ WORKDIR /app
 # 安装基础运行时依赖
 RUN apk add --no-cache ca-certificates tzdata
 
-# 从编译阶段复制二进制和默认资源
+# 从编译阶段复制二进制和静态资源
 COPY --from=builder /usr/src/app/target/release/mdict-rs /app/mdict-rs
-COPY --from=builder /usr/src/app/crates/mdict-server/resources/static /app/resources/static
+COPY --from=builder /usr/src/app/crates/mdict-server/resources/static /app/static
 
 # 创建默认词典存放目录
 RUN mkdir -p /app/mdict
