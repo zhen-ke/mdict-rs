@@ -16,7 +16,7 @@
 //! 这一套即 onedict 的 `Index::suggest` 做法，照搬到 mdict 的 `MDX_INDEX`
 //! schema 上。不改索引 schema —— 只复用现有 `idx_mdx_normalized`。
 
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 use crate::normalize::{canonical_normalize, prefix_upper};
 
@@ -141,9 +141,11 @@ fn is_fuzzy_candidate(word: &str) -> bool {
     if word.contains('/') || word.contains('\\') || word.contains('<') || word.contains('>') {
         return false;
     }
-    if let Some(first) = word.chars().next()
-        && (first == '-' || first == '.' || first == '@' || first.is_ascii_digit())
-    {
+    let starts_with_symbol_or_digit = matches!(
+        word.chars().next(),
+        Some(c) if c == '-' || c == '.' || c == '@' || c.is_ascii_digit()
+    );
+    if starts_with_symbol_or_digit {
         return false;
     }
     true
