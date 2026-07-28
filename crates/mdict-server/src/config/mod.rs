@@ -114,12 +114,12 @@ pub fn scan_dict_files(dict_dir: &Path) -> Vec<PathBuf> {
 /// 3. 开发模式的 resources/static
 pub fn static_path() -> anyhow::Result<PathBuf> {
     // 1. 二进制同级
-    if let Ok(exe_path) = env::current_exe()
-        && let Some(exe_dir) = exe_path.parent()
-    {
-        let static_dir = exe_dir.join("static");
-        if static_dir.exists() {
-            return Ok(static_dir);
+    if let Ok(exe_path) = env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let static_dir = exe_dir.join("static");
+            if static_dir.exists() {
+                return Ok(static_dir);
+            }
         }
     }
 
