@@ -549,10 +549,10 @@ fn is_suggest_candidate(word: &str) -> bool {
     if word.contains('/') || word.contains('\\') || word.contains('<') || word.contains('>') {
         return false;
     }
-    if let Some(first) = word.chars().next()
-        && (first == '-' || first == '.' || first.is_ascii_digit())
-    {
-        return false;
+    if let Some(first) = word.chars().next() {
+        if first == '-' || first == '.' || first.is_ascii_digit() {
+            return false;
+        }
     }
     true
 }
@@ -567,10 +567,10 @@ fn calculate_fts_score(prefix: &str, word_lower: &str, word: &str, bm25_score: f
     if word_lower.starts_with(prefix) {
         score += 100;
     }
-    if let Some(ch) = prefix.chars().next()
-        && word.starts_with(&ch.to_uppercase().to_string())
-    {
-        score += 20;
+    if let Some(ch) = prefix.chars().next() {
+        if word.starts_with(&ch.to_uppercase().to_string()) {
+            score += 20;
+        }
     }
 
     score += 50 - word.len().min(50) as i32;

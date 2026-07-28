@@ -70,51 +70,51 @@ pub fn cacheable_binary_response(
     let if_none_match = request_headers
         .and_then(|h| h.get(IF_NONE_MATCH))
         .and_then(|v| v.to_str().ok());
-    if let Some(if_none_match) = if_none_match
-        && etag_matches(if_none_match, &etag)
-    {
-        return axum::http::Response::builder()
-            .status(StatusCode::NOT_MODIFIED)
-            .header(ETAG, etag)
-            .header(CACHE_CONTROL, cache_control)
-            .header(ACCEPT_RANGES, "bytes")
-            .body("".into())
-            .unwrap();
+    if let Some(if_none_match) = if_none_match {
+        if etag_matches(if_none_match, &etag) {
+            return axum::http::Response::builder()
+                .status(StatusCode::NOT_MODIFIED)
+                .header(ETAG, etag)
+                .header(CACHE_CONTROL, cache_control)
+                .header(ACCEPT_RANGES, "bytes")
+                .body("".into())
+                .unwrap();
+        }
     }
 
     let range_header = request_headers
         .and_then(|h| h.get(RANGE))
         .and_then(|v| v.to_str().ok());
-    if let Some(range_header) = range_header
-        && range_header.trim().starts_with("bytes=")
-    {
-        return match parse_single_range(range_header, total_len) {
-            Some((start, end)) => {
-                let chunk = data.slice(start..(end + 1));
-                let chunk_len = chunk.len();
-                axum::http::Response::builder()
-                    .status(StatusCode::PARTIAL_CONTENT)
-                    .header("Content-Type", content_type)
-                    .header(CONTENT_LENGTH, chunk_len.to_string())
-                    .header(
-                        CONTENT_RANGE,
-                        format!("bytes {}-{}/{}", start, end, total_len),
-                    )
+    if let Some(range_header) = range_header {
+        if range_header.trim().starts_with("bytes=") {
+            return match parse_single_range(range_header, total_len) {
+                Some((start, end)) => {
+                    let chunk = data.slice(start..(end + 1));
+                    let chunk_len = chunk.len();
+                    axum::http::Response::builder()
+                        .status(StatusCode::PARTIAL_CONTENT)
+                        .header("Content-Type", content_type)
+                        .header(CONTENT_LENGTH, chunk_len.to_string())
+                        .header(
+                            CONTENT_RANGE,
+                            format!("bytes {}-{}/{}", start, end, total_len),
+                        )
+                        .header(ACCEPT_RANGES, "bytes")
+                        .header(ETAG, etag)
+                        .header(CACHE_CONTROL, cache_control)
+                        .body(chunk.into())
+                        .unwrap()
+                }
+                None => axum::http::Response::builder()
+                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .header(CONTENT_RANGE, format!("bytes */{}", total_len))
                     .header(ACCEPT_RANGES, "bytes")
                     .header(ETAG, etag)
                     .header(CACHE_CONTROL, cache_control)
-                    .body(chunk.into())
-                    .unwrap()
-            }
-            None => axum::http::Response::builder()
-                .status(StatusCode::RANGE_NOT_SATISFIABLE)
-                .header(CONTENT_RANGE, format!("bytes */{}", total_len))
-                .header(ACCEPT_RANGES, "bytes")
-                .header(ETAG, etag)
-                .header(CACHE_CONTROL, cache_control)
-                .body("".into())
-                .unwrap(),
-        };
+                    .body("".into())
+                    .unwrap(),
+            };
+        }
     }
 
     axum::http::Response::builder()

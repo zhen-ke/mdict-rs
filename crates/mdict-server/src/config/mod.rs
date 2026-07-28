@@ -23,13 +23,13 @@ pub fn get_dict_dir() -> PathBuf {
     }
 
     // 2. 尝试二进制同级目录
-    if let Ok(exe_path) = env::current_exe()
-        && let Some(exe_dir) = exe_path.parent()
-    {
-        let dict_dir = exe_dir.join("mdict");
-        if dict_dir.exists() {
-            info!("Using dict dir next to binary: {:?}", dict_dir);
-            return dict_dir;
+    if let Ok(exe_path) = env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let dict_dir = exe_dir.join("mdict");
+            if dict_dir.exists() {
+                info!("Using dict dir next to binary: {:?}", dict_dir);
+                return dict_dir;
+            }
         }
     }
 
