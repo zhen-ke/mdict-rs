@@ -30,8 +30,24 @@ use axum::{
 use tokio::fs;
 
 const RESOURCE_CACHE_CONTROL: &str = "public, max-age=86400, immutable";
+/// `index.html` 是 SPA 入口：前端更新后必须让浏览器重拉，故不能 immutable。
+/// 改为每次发条件请求（cacheable_binary_response 已带 ETag、支持 If-None-Match
+/// 返回 304）；HTML 体积小、代价可忽略。其余静态资源（index.js/css / lm6.* /
+/// 字体）保留 `immutable,24h`，享受长缓存——它们变更紫疾 hashed 现阶段依据此头。
+const HTML_CACHE_CONTROL: &str = "max-age=0, must-revalidate";
 const MAX_CACHEABLE_RESOURCE_BYTES: usize = 1024 * 1024;
 const MAX_CACHEABLE_MEDIA_BYTES: usize = 256 * 1024;
+
+/// 按请求路径选择静态资源的缓存头。`index.html`（直接访问或目录索引 `/`）
+/// 走可重验策略；其余路径走 immutable 长缓存。词典资源（/dict/{id}/res/…）
+/// 不会以 `index.html` 结尾，故也可安全调用——退回 RESOURCE_CACHE_CONTROL。
+fn static_cache_control(request_path: &str) -> &'static str {
+    if request_path == "/" || request_path.ends_with("index.html") {
+        HTML_CACHE_CONTROL
+    } else {
+        RESOURCE_CACHE_CONTROL
+    }
+}
 
 #[derive(Deserialize, Debug)]
 pub struct SuggestQuery {
@@ -226,14 +242,12 @@ pub(crate) async fn handle_resource(
     let path = uri.path();
     let cache_key = cache_key_global_resource(path);
     let negative_key = negative_key(&cache_key);
+    // 依据请求路径选择缓存头：index.html 可重验、其它 immutable。缓存命中与下游
+    // 分发同一条头策略，避免命中后取回首选项不一致。
+    let cache_control = static_cache_control(path);
 
     if let Some((data, content_type)) = state.get_resource_cached(&cache_key) {
-        return cacheable_binary_response(
-            data,
-            &content_type,
-            RESOURCE_CACHE_CONTROL,
-            Some(&headers),
-        );
+        return cacheable_binary_response(data, &content_type, cache_control, Some(&headers));
     }
     if state.is_negative_cached(&negative_key) {
         return not_found();
@@ -255,7 +269,7 @@ pub(crate) async fn handle_resource(
                     return cacheable_binary_response(
                         data,
                         &static_file.content_type,
-                        RESOURCE_CACHE_CONTROL,
+                        cache_control,
                         Some(&headers),
                     );
                 }
@@ -263,12 +277,8 @@ pub(crate) async fn handle_resource(
                     tracing::warn!("Failed to read static file {:?}: {}", static_file.path, e);
                 }
             }
-        } else if let Some(resp) = stream_file_response(
-            &static_file.path,
-            &static_file.content_type,
-            RESOURCE_CACHE_CONTROL,
-        )
-        .await
+        } else if let Some(resp) =
+            stream_file_response(&static_file.path, &static_file.content_type, cache_control).await
         {
             state.clear_negative_cache(&negative_key);
             return resp;
@@ -307,7 +317,7 @@ pub(crate) async fn handle_resource(
                 state.put_resource_cached(cache_key, data.clone(), content_type.clone());
             }
             state.clear_negative_cache(&negative_key);
-            cacheable_binary_response(data, &content_type, RESOURCE_CACHE_CONTROL, Some(&headers))
+            cacheable_binary_response(data, &content_type, cache_control, Some(&headers))
         }
         None => {
             state.put_negative_cache(negative_key);
@@ -749,6 +759,11 @@ pub struct DictIndexStatus {
     pub up_to_date: bool,
     pub has_fts: bool,
     pub fts_enabled: bool,
+    /// 后台构建索引过程中（重试仍失败）的最末失败原因；一切就绪时为 None。
+    /// 前端 setup 页可据此提示“词典 X 建立失败：原因”，避免静默 pending。
+    pub last_error: Option<String>,
+    /// 索引后台已试过的总次数（含首轮）。0 表示尚无任何失败被记录。
+    pub index_attempts: u32,
 }
 
 /// GET /api/dicts - Get list of all dictionaries with their configs
@@ -777,6 +792,10 @@ pub(crate) async fn handle_index_status(
             .map(|cfg| cfg.is_fts_enabled())
             .unwrap_or(true);
 
+        let (last_error, index_attempts) = state
+            .get_index_failure(file)
+            .map(|f| (Some(f.error), f.attempts))
+            .unwrap_or((None, 0));
         items.push(DictIndexStatus {
             id,
             name: state.get_dict_display_name(file),
@@ -785,6 +804,8 @@ pub(crate) async fn handle_index_status(
             up_to_date: status.up_to_date,
             has_fts: status.has_fts,
             fts_enabled,
+            last_error,
+            index_attempts,
         });
     }
     Json(items)

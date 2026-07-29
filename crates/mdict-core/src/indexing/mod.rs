@@ -49,7 +49,12 @@ pub fn db_path(dict_file: &Path) -> PathBuf {
 }
 
 /// indexing all mdx files into db
-pub fn indexing(jobs: &[IndexJob], reindex: bool) -> anyhow::Result<()> {
+///
+/// 失败时返回 `Err(failures)`，把“哪些词典失败了、失败原因是什么”一并交给
+/// 调用方。调用方可据此在后台任务里做按文件的重试/退避，并把最后一次失败
+/// 写入 `/api/index/status` 可见的字段——避免此前 fire-and-forget 模型下“若
+/// 维一 · 单 .db 永不生成则全程静默 503”的隐性 STL。
+pub fn indexing(jobs: &[IndexJob], reindex: bool) -> Result<(), Vec<(PathBuf, anyhow::Error)>> {
     use rayon::prelude::*;
 
     let failures: Vec<(PathBuf, anyhow::Error)> = jobs
@@ -66,16 +71,14 @@ pub fn indexing(jobs: &[IndexJob], reindex: bool) -> anyhow::Result<()> {
         for (file, err) in &failures {
             warn!("Indexing failed for {:?}: {}", file, err);
         }
-        Err(anyhow::anyhow!(
-            "Indexing failed for {} dictionaries",
-            failures.len()
-        ))
+        Err(failures)
     }
 }
 
 pub fn ensure_index(job: &IndexJob, reindex: bool) -> anyhow::Result<()> {
     let file = &job.path;
     let db_path = db_path(file);
+
     if db_path.exists() {
         let needs_reindex = if reindex {
             true
@@ -91,26 +94,26 @@ pub fn ensure_index(job: &IndexJob, reindex: bool) -> anyhow::Result<()> {
                 }
             }
         };
-
-        if needs_reindex {
-            fs::remove_file(&db_path)?;
-            info!(
-                "Rebuilding index for {:?}, old db removed: {:?}",
-                file, db_path
-            );
-            let start = std::time::Instant::now();
-            mdx_to_sqlite(file, job.fts_enabled)?;
-            tracing::info!(
-                "Index built for {:?} in {:.2}s",
-                file,
-                start.elapsed().as_secs_f64()
-            );
+        if !needs_reindex {
+            return Ok(());
         }
-        return Ok(());
+        fs::remove_file(&db_path)?;
+        info!(
+            "Rebuilding index for {:?}, old db removed: {:?}",
+            file, db_path
+        );
     }
 
+    // mdx_to_sqlite 会在解析早期 `Connection::open(&db_file)` 先创建磁盘上的
+    // 空 .db；若随后 MDX 头/块解析失败（corrupt MDX input），这条 .db 会成
+    // 为孤儿文件。为避免孤儿遗忘在词典目录里误导 `index_status`（原本说“建立
+    // 失败”的词典会被 `/api/index/status` 显示为 db_exists=true、up_to_date=false、
+    // 看似“仍在建”），失赍路径里主动删除孤儿。重进下一步重试时它会自然再生成。
     let start = std::time::Instant::now();
-    mdx_to_sqlite(file, job.fts_enabled)?;
+    if let Err(e) = mdx_to_sqlite(file, job.fts_enabled) {
+        let _ = fs::remove_file(&db_path);
+        return Err(e);
+    }
     tracing::info!(
         "Index built for {:?} in {:.2}s",
         file,

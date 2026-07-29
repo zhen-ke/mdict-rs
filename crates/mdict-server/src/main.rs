@@ -12,9 +12,10 @@ use axum::{
     routing::{get, post},
 };
 use std::error::Error;
+use std::path::PathBuf;
 use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod app_state;
@@ -38,11 +39,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // 扫描词典文件
     let dict_files = scan_dict_files(&dict_dir);
 
-    // 确保索引已生成（首次启动会花时间；后续有 .db 则很快）
-    if !dict_files.is_empty() {
-        // FTS 仅对文本词典（.mdx）有意义；资源词典（.mdd）强制关闭。
-        // 单词典可通过同名 .toml 配置关闭 FTS。
-        let jobs: Vec<IndexJob> = dict_files
+    info!("Using dict dir: {:?}", dict_dir);
+    info!("Serving static files from: {:?}", static_dir);
+
+    // 构建索引任务表：需在 `AppState::new` 消费 `dict_files` 之前完成。
+    // FTS 仅对文本词典（.mdx）有意义；资源词典（.mdd）强制关闭。
+    // 单词典可通过同名 .toml 配置关闭 FTS。
+    let jobs: Vec<IndexJob> = if dict_files.is_empty() {
+        Vec::new()
+    } else {
+        dict_files
             .iter()
             .map(|file| {
                 let is_text_dict = !file
@@ -54,16 +60,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         .unwrap_or(true);
                 IndexJob::new(file.clone(), fts_enabled)
             })
-            .collect();
+            .collect()
+    };
+    if !jobs.is_empty() {
         info!(
             "Scheduling background index ensure for {} dictionary files",
             jobs.len()
         );
-        tokio::task::spawn_blocking(move || match indexing(&jobs, false) {
-            Ok(()) => info!("Background indexing completed"),
-            Err(e) => error!("Background indexing finished with errors: {}", e),
-        });
-
         let missing: usize = dict_files
             .iter()
             .filter(|file| !db_path(file).exists())
@@ -76,10 +79,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    info!("Using dict dir: {:?}", dict_dir);
-    info!("Serving static files from: {:?}", static_dir);
-
     let state = AppState::new(dict_dir, static_dir.clone(), dict_files);
+
+    // 后台索引固定交给独立 tokio task：采用异步重试循环（5s / 20s / 60s），
+    // 成功的词典从失败 map 清除；重试仍失败时把原因写入 AppState 供
+    // `/api/index/status` 暴露，避免此前 fire-and-forget 静默 503。
+    if !jobs.is_empty() {
+        tokio::spawn(indexing_with_retry(jobs, state.clone()));
+    }
 
     let app = Router::new()
         // 轻量存活探针：容器编排 / NAS Health Check 使用，不走 AppState、不占 Semaphore。响应体极小。
@@ -130,6 +137,94 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await?;
 
     Ok(())
+}
+
+/// 后台索引重试循环。初始一次性尝试，失败则按 5s / 20s / 60s 退避重试两轮，
+/// 依然失败则把最后一次错误写入 [`AppState::record_index_failure`]，供
+/// `/api/index/status` 暴露。退避用 `tokio::time::sleep` 而非阻塞 `thread::sleep`，
+/// 不占用 blocking 线程。
+///
+/// 重试采用「按文件重试」策略：每一轮只重试上一轮仍失败的子集，避免对已
+/// 成功的词典重复建索引。`indexing()` 本身用 rayon 并行按文件调度。
+async fn indexing_with_retry(jobs: Vec<IndexJob>, state: AppState) {
+    use std::time::Duration;
+
+    const MAX_ATTEMPTS: u32 = 3;
+    const BACKOFFS: [Duration; 2] = [Duration::from_secs(5), Duration::from_secs(20)];
+
+    let mut pending: Vec<IndexJob> = jobs;
+    let mut attempts: u32 = 0;
+    loop {
+        attempts += 1;
+        let snapshot = pending.clone();
+        tracing::info!(
+            "Background indexing attempt {} of {} ({} files)",
+            attempts,
+            MAX_ATTEMPTS,
+            snapshot.len()
+        );
+        // 复用 indexing 的 rayon 并行按件调度；join panic 也化为同一条 ETL。
+        let result = tokio::task::spawn_blocking(move || indexing(&snapshot, false))
+            .await
+            .map_err(|join| {
+                vec![(
+                    PathBuf::new(),
+                    anyhow::anyhow!("indexing task join error: {join}"),
+                )]
+            });
+
+        match result {
+            Ok(Ok(())) => {
+                // 本轮全部文件成功：把它们从失败 map 中清除，供 /api/index/status 显示。
+                for job in &pending {
+                    state.clear_index_failure(&job.path);
+                }
+                info!("Background indexing completed successfully");
+                return;
+            }
+            Ok(Err(failures)) | Err(failures) => {
+                // join panic 路径会产生一条 path=="" 的合成记录，其它是真实文件路径。
+                for (path, err) in &failures {
+                    if path.as_os_str().is_empty() {
+                        error!("Background indexing join error: {}", err);
+                        continue;
+                    }
+                    // 中间轮也写入，前端可在重试期间看到当前原因+尝试次数。
+                    warn!(
+                        "Background indexing failed for {:?} on attempt {}: {}",
+                        path, attempts, err
+                    );
+                    state.record_index_failure(path.clone(), err.to_string(), attempts);
+                }
+                if attempts >= MAX_ATTEMPTS {
+                    for (path, err) in &failures {
+                        if path.as_os_str().is_empty() {
+                            continue;
+                        }
+                        error!(
+                            "Background indexing gave up on {:?} after {} attempts: {}",
+                            path, attempts, err
+                        );
+                    }
+                    return;
+                }
+                let backoff = BACKOFFS[(attempts - 1) as usize];
+                warn!(
+                    "Background indexing still failing for {} dict(s); retrying in {:?}",
+                    failures.len(),
+                    backoff
+                );
+                // 只重试仍失败的真实词典子集
+                let failed_paths: std::collections::HashSet<PathBuf> = failures
+                    .iter()
+                    .map(|(p, _)| p.clone())
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .collect();
+                pending.retain(|j| failed_paths.contains(&j.path));
+                tokio::time::sleep(backoff).await;
+            }
+        }
+    }
 }
 
 /// 监听 Ctrl-C 与（Unix）SIGTERM，任一到达即触发优雅停机。

@@ -14,6 +14,18 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::config::{DictConfig, DictInfo};
 use mdict_core::mdict::reader::{MdxReader, per_reader_cache_budget};
 
+/// 一本词典索引构建最近一次失败的快照，供 `/api/index/status` 暴露给前端/dashboard。
+///
+/// 由 `main.rs` 的后台索引重试循环写入：每次重试仍失败则 `record_index_failure`。
+/// 一旦重试成功或被其后 `mark_index_ok` 清掉，则从 map 中移除。
+#[derive(Clone, Debug)]
+pub struct IndexFailure {
+    /// 最近一次失败的人话描述（含底层 anyhow 链的 `#` 提示如果有）。
+    pub error: String,
+    /// 总尝试次数（含首轮这一次）。
+    pub attempts: u32,
+}
+
 /// Entry cache 的字节预算上限。moka 的 `max_capacity` 配合 `weigher` 后语义是
 /// “所有缓存项的 weight 之和 ≤ max_capacity”，故这里把 `data.len()` 作为 weight，
 /// 整个 entry cache 的内存峰值被钉死在这个量级，与单个聚合页大小无关。
@@ -23,6 +35,14 @@ const RESOURCE_CACHE_BYTES: u64 = 128 * 1024 * 1024;
 /// 条目式兜底容量（moka 同时受 `max_capacity` 与 `weigher` 双重约束，取最小）。
 const RESOURCE_CACHE_MAX_ENTRIES: u64 = 4096;
 const NEGATIVE_CACHE_SIZE: u64 = 1024;
+/// 默认每连接 SQLite page cache（`PRAGMA cache_size = -N` 以 KB 计）。64MB 对单
+/// 词典在内存宽裕的桌面场景合适；小内存 ARM（1-2GB）部署多词典时建议设小
+/// `MDICT_SQLITE_CACHE_KB` 环境变量，或同时调低池上限 `MDICT_SQLITE_POOL_MAX`，
+/// 否则 `cache_size × pool_max × N 词典` 的乘积可能撞到物理内存上限。
+const DEFAULT_SQLITE_CACHE_KB: i64 = 64 * 1024;
+const DEFAULT_SQLITE_POOL_MAX: u32 = 10;
+const DEFAULT_SQLITE_POOL_MIN_IDLE: u32 = 2;
+
 /// 阻塞查询并发的硬上界（也作为 `available_parallelism` 取不到值时的兑回路值）。
 ///
 /// 实际默认值在运行时自适应为 `min(64, max(8, n_cpus))`——见
@@ -37,6 +57,37 @@ fn runtime_max_concurrent_blocking_queries() -> usize {
         .map(|v| v.get())
         .unwrap_or(DEFAULT_MAX_CONCURRENT_BLOCKING_QUERIES);
     n.clamp(8, DEFAULT_MAX_CONCURRENT_BLOCKING_QUERIES)
+}
+
+/// SQLite 每连接的 page cache 大小（KB），对应 `PRAGMA cache_size = -N`。
+/// 取值范围必须 > 0；非正或不存在的环境变量走默认值。
+fn sqlite_cache_kb() -> i64 {
+    std::env::var("MDICT_SQLITE_CACHE_KB")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_SQLITE_CACHE_KB)
+}
+
+/// 每词典连接池上限。取值范围必须 > 0。
+fn sqlite_pool_max() -> u32 {
+    std::env::var("MDICT_SQLITE_POOL_MAX")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_SQLITE_POOL_MAX)
+}
+
+/// 每词典连接池下限保活数。取 0 表示不强制保活。
+fn sqlite_pool_min_idle() -> Option<u32> {
+    let raw = std::env::var("MDICT_SQLITE_POOL_MIN_IDLE")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok());
+    match raw {
+        Some(0) => None,
+        Some(v) => Some(v),
+        None => Some(DEFAULT_SQLITE_POOL_MIN_IDLE),
+    }
 }
 const ENTRY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const RESOURCE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
@@ -142,6 +193,10 @@ struct RuntimeState {
     resource_cache: Cache<String, CachedPayload>,
     /// Lock-free concurrent LRU cache for negative (miss) entries (moka).
     negative_cache: Cache<String, ()>,
+    /// 词典索引后台构建的最近一次失败快照（为每个仍处于失败状态的词典
+    /// 保留一条）。以路径为键、线程安全读写；`/api/index/status` 读取它把
+    /// 失败原因暴露给前端，填补此前 fire-and-forget 的静默盲区。
+    index_failures: RwLock<HashMap<PathBuf, IndexFailure>>,
 }
 
 impl RuntimeState {
@@ -169,6 +224,7 @@ impl RuntimeState {
                 .max_capacity(NEGATIVE_CACHE_SIZE)
                 .time_to_live(NEGATIVE_CACHE_TTL)
                 .build(),
+            index_failures: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -319,21 +375,24 @@ impl AppState {
 
     fn build_pool(db_file: &Path) -> anyhow::Result<Pool<SqliteConnectionManager>> {
         let db_uri = format!("file:{}?mode=ro&immutable=1", db_file.to_string_lossy());
+        let cache_kb = sqlite_cache_kb();
         let manager = SqliteConnectionManager::file(db_uri)
             .with_flags(
                 OpenFlags::SQLITE_OPEN_READ_ONLY
                     | OpenFlags::SQLITE_OPEN_NO_MUTEX
                     | OpenFlags::SQLITE_OPEN_URI,
             )
-            .with_init(|conn| {
-                let _ = conn.pragma_update(None, "cache_size", "-64000");
+            .with_init(move |conn| {
+                // `PRAGMA cache_size = -N` 以 KB 计：负值告诉 SQLite 用 S KB 的
+                // page cache（正值则解释为页数）。一次性在 pool init 里定下预算。
+                let _ = conn.pragma_update(None, "cache_size", -(cache_kb));
                 let _ = conn.pragma_update(None, "temp_store", "MEMORY");
                 Ok(())
             });
 
         Pool::builder()
-            .max_size(10)
-            .min_idle(Some(2))
+            .max_size(sqlite_pool_max())
+            .min_idle(sqlite_pool_min_idle())
             .build(manager)
             .map_err(|e| {
                 anyhow::anyhow!("Failed to create connection pool for {:?}: {}", db_file, e)
@@ -450,6 +509,34 @@ impl AppState {
 
     pub fn clear_negative_cache(&self, key: &str) {
         self.runtime.negative_cache.invalidate(key);
+    }
+
+    /// 后台索引任务记录/更新某词典最后一次失败。重复记录会覆盖原有的错误与尝试次数。
+    pub fn record_index_failure(&self, path: PathBuf, error: String, attempts: u32) {
+        self.runtime
+            .index_failures
+            .write()
+            .expect("index_failures rwlock poisoned")
+            .insert(path, IndexFailure { error, attempts });
+    }
+
+    /// 后台索引重试成功后，从失败 map 移除该词典（使 `/api/index/status` 回归净状态）。
+    pub fn clear_index_failure(&self, path: &Path) {
+        self.runtime
+            .index_failures
+            .write()
+            .expect("index_failures rwlock poisoned")
+            .remove(path);
+    }
+
+    /// 查询某词典是否有记录的索引失败。返回 `Clone` 的快照以供 handler 序列化。
+    pub fn get_index_failure(&self, path: &Path) -> Option<IndexFailure> {
+        self.runtime
+            .index_failures
+            .read()
+            .expect("index_failures rwlock poisoned")
+            .get(path)
+            .cloned()
     }
 
     pub fn try_acquire_query_slot(&self) -> Option<OwnedSemaphorePermit> {
