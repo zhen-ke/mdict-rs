@@ -1077,30 +1077,55 @@ footer span {
 	margin: 0 4px !important;
 }
 
-/* 快速跳转与菜单按钮 (.popup-button / .chwd a 等) */
+/* 扩展功能栏目与快捷跳转按钮 (.buttons / .popup-button) */
+#mdx-resp .buttons {
+	display: flex !important;
+	flex-wrap: wrap !important;
+	align-items: center !important;
+	gap: 8px 10px !important;
+	margin: 10px 0 12px 0 !important;
+	width: 100% !important;
+}
+
 #mdx-resp .popup-button,
 #mdx-resp .chwd a,
 #mdx-resp .buttons a {
-	background: rgba(99, 102, 241, 0.12) !important;
-	border: 1px solid rgba(99, 102, 241, 0.28) !important;
+	display: inline-flex !important;
+	align-items: center !important;
+	justify-content: center !important;
+	background: rgba(99, 102, 241, 0.08) !important;
+	border: 1px solid rgba(129, 140, 248, 0.22) !important;
 	color: #c7d2fe !important;
-	border-radius: 6px !important;
-	padding: 3px 9px !important;
+	border-radius: 20px !important;
+	padding: 4px 12px !important;
+	font-family: var(--font-sans) !important;
 	font-size: 0.78rem !important;
 	font-weight: 600 !important;
-	text-transform: uppercase !important;
-	letter-spacing: 0.03em !important;
-	margin: 3px 4px 3px 0 !important;
-	display: inline-block !important;
+	text-transform: capitalize !important;
+	letter-spacing: 0.02em !important;
+	margin: 0 !important;
 	text-decoration: none !important;
-	transition: all 0.15s !important;
+	cursor: pointer !important;
+	user-select: none !important;
+	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1) !important;
+	transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
 }
 
 #mdx-resp .popup-button:hover,
 #mdx-resp .chwd a:hover {
-	background: rgba(99, 102, 241, 0.25) !important;
-	border-color: var(--primary) !important;
+	background: rgba(99, 102, 241, 0.22) !important;
+	border-color: #818cf8 !important;
 	color: #ffffff !important;
+	transform: translateY(-1px) !important;
+	box-shadow: 0 4px 12px rgba(99, 102, 241, 0.25) !important;
+}
+
+#mdx-resp .popup-button:active,
+#mdx-resp .popup-button.active {
+	background: #6366f1 !important;
+	border-color: #6366f1 !important;
+	color: #ffffff !important;
+	box-shadow: 0 2px 8px rgba(99, 102, 241, 0.4) !important;
 }
 
 /* 语法 / 搭配 / 用法说明框 (USAGE, GRAMMAR, THESAURUS) */
