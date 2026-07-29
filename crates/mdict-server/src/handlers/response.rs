@@ -70,8 +70,8 @@ pub fn cacheable_binary_response(
     let if_none_match = request_headers
         .and_then(|h| h.get(IF_NONE_MATCH))
         .and_then(|v| v.to_str().ok());
-    if let Some(if_none_match) = if_none_match
-        && etag_matches(if_none_match, &etag) {
+    if let Some(if_none_match) = if_none_match {
+        if etag_matches(if_none_match, &etag) {
             return axum::http::Response::builder()
                 .status(StatusCode::NOT_MODIFIED)
                 .header(ETAG, etag)
@@ -80,12 +80,13 @@ pub fn cacheable_binary_response(
                 .body("".into())
                 .unwrap();
         }
+    }
 
     let range_header = request_headers
         .and_then(|h| h.get(RANGE))
         .and_then(|v| v.to_str().ok());
-    if let Some(range_header) = range_header
-        && range_header.trim().starts_with("bytes=") {
+    if let Some(range_header) = range_header {
+        if range_header.trim().starts_with("bytes=") {
             return match parse_single_range(range_header, total_len) {
                 Some((start, end)) => {
                     let chunk = data.slice(start..(end + 1));
@@ -114,6 +115,7 @@ pub fn cacheable_binary_response(
                     .unwrap(),
             };
         }
+    }
 
     axum::http::Response::builder()
         .status(StatusCode::OK)

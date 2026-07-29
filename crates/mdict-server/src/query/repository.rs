@@ -148,14 +148,15 @@ fn read_record_at(
 ) -> Result<Option<Bytes>, QueryError> {
     let record_offset = loc.record_offset;
     let record_length = loc.record_length;
-    if let Some(max) = max_record_length
-        && record_length > max {
+    if let Some(max) = max_record_length {
+        if record_length > max {
             debug!(
                 "skip oversized record {} bytes > {} in {:?}",
                 record_length, max, file
             );
             return Ok(None);
         }
+    }
     let block_offset = loc.block_offset;
     let block_csize = loc.block_csize;
     let block_dsize = loc.block_dsize;
