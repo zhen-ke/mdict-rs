@@ -881,16 +881,17 @@ footer span {
    Dictionary Entry Styling (彻底消除突兀红框 & 盒中盒)
    ============================================= */
 
-/* 取消所有全词红框高亮 */
+/* 搜索高亮 (消除词中切割错觉，保持单词完整性) */
 .search-highlight,
 #mdx-resp .search-highlight,
 #mdx-resp .mdict-query-word {
-	background: none !important;
+	background: rgba(96, 165, 250, 0.16) !important;
 	border: none !important;
-	color: #60a5fa !important;
-	font-weight: 700 !important;
-	padding: 0 !important;
-	border-radius: 0 !important;
+	border-bottom: 1.5px solid rgba(96, 165, 250, 0.45) !important;
+	color: #93c5fd !important;
+	font-weight: inherit !important;
+	padding: 0 2px !important;
+	border-radius: 3px !important;
 	box-shadow: none !important;
 }
 
@@ -1022,17 +1023,18 @@ footer span {
 
 #mdx-resp .def,
 #mdx-resp .DEF {
-	color: #f8fafc;
-	font-family: var(--font-serif);
-	font-weight: 500;
+	color: #f8fafc !important;
+	font-family: var(--font-serif) !important;
+	font-weight: 500 !important;
+	line-height: 1.65 !important;
 }
 
 #mdx-resp .defcn,
 #mdx-resp .DEFCN {
-	color: #67e8f9;
-	font-family: var(--font-serif);
-	margin-left: 8px;
-	font-weight: 400;
+	color: #38bdf8 !important;
+	font-family: var(--font-sans) !important;
+	margin-left: 10px !important;
+	font-weight: 400 !important;
 }
 
 /* 例句 (优雅的缩进与细导线，统正文中西文字体) */
