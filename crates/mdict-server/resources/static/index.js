@@ -966,42 +966,10 @@ function queryMdx(word, updateHistory = true) {
 }
 
 function queryDictEntryByUrl(url, word) {
-	if (!url) return;
-
-	currentQuery = word || currentQuery;
-	showLoading();
-	hideHistoryDropdown();
-	hideSuggestions();
-
-	$.ajax({
-		url: url,
-		type: "GET",
-		dataType: "html",
-		success: (data) => {
-			if (data && data.trim() !== "" && !data.includes("not found")) {
-				if (word) {
-					saveHistory(word);
-					updateUrl(word, true);
-					$("#word").val(word);
-					document.title = word + " - MDict 极速词典";
-				}
-
-				const highlighted = highlightSearchTerm(data, currentQuery);
-				$("#mdx-resp").html(highlighted).show();
-				enhanceAggregateResult();
-				$("#share-btn").show();
-			} else {
-				showEmpty();
-			}
-		},
-		error: (xhr) => {
-			if (xhr.status === 404) {
-				showEmpty();
-			} else {
-				showError("词条跳转失败，请稍后重试");
-			}
-		},
-	});
+	if (word) {
+		$("#word").val(word);
+		queryMdx(word);
+	}
 }
 
 function playAudioUrl(audioPath) {
