@@ -186,20 +186,27 @@ fn rewrite_link(attr: &str, value: &str, dict_id: &str) -> Option<String> {
     }
 
     if let Some(target) = value.strip_prefix("entry://") {
-        let (base, _) = split_base_and_suffix(target);
+        let (base, suffix) = split_base_and_suffix(target);
         let entry_word = normalize_entry_word(base);
         if entry_word.is_empty() {
+            if !suffix.is_empty() {
+                return Some(suffix.to_string());
+            }
             return None;
         }
         return Some(format!(
-            "/dict/{}/entry/{}",
+            "/dict/{}/entry/{}{}",
             dict_id,
-            encode_entry_word(&entry_word)
+            encode_entry_word(&entry_word),
+            suffix
         ));
     }
 
     let (base, suffix) = split_base_and_suffix(value);
     if base.is_empty() {
+        if !suffix.is_empty() {
+            return Some(suffix.to_string());
+        }
         return None;
     }
 
@@ -220,12 +227,16 @@ fn rewrite_link(attr: &str, value: &str, dict_id: &str) -> Option<String> {
     // `href` / `data-href` plain word → entry route (cross-dict link).
     let entry_word = normalize_entry_word(base);
     if entry_word.is_empty() {
+        if !suffix.is_empty() {
+            return Some(suffix.to_string());
+        }
         return None;
     }
     Some(format!(
-        "/dict/{}/entry/{}",
+        "/dict/{}/entry/{}{}",
         dict_id,
-        encode_entry_word(&entry_word)
+        encode_entry_word(&entry_word),
+        suffix
     ))
 }
 
@@ -361,6 +372,14 @@ mod tests {
         let html = r#"<a href="entry://hello world">x</a>"#;
         let out = rewrite_html(html, "d1");
         assert!(out.contains(r#"href="/dict/d1/entry/hello%20world""#));
+    }
+
+    #[test]
+    fn rewrites_entry_scheme_with_anchor() {
+        let html = r#"<a href="entry://#LDOCE6_weather_1">Noun</a><a href="entry://weather#LDOCE6_weather_2">Verb</a>"#;
+        let out = rewrite_html(html, "d1");
+        assert!(out.contains(r##"href="#LDOCE6_weather_1""##));
+        assert!(out.contains(r##"href="/dict/d1/entry/weather#LDOCE6_weather_2""##));
     }
 
     #[test]

@@ -909,7 +909,7 @@ $(document).on("click", "#share-btn", function (e) {
 // =============================================
 // 核心查询功能
 // =============================================
-function queryMdx(word, updateHistory = true) {
+function queryMdx(word, updateHistory = true, anchorId = "") {
 	if (!word || !validInput(word)) {
 		return;
 	}
@@ -943,6 +943,9 @@ function queryMdx(word, updateHistory = true) {
 
 				$("#mdx-resp").html(highlighted).show();
 				enhanceAggregateResult();
+				if (anchorId) {
+					setTimeout(() => scrollToAnchor(anchorId), 50);
+				}
 
 				// 添加复制按钮
 
@@ -1075,6 +1078,26 @@ function selectSuggestion(index) {
 	} else {
 		selectedIndex = -1;
 	}
+}
+
+function scrollToAnchor(anchorId) {
+	if (!anchorId) return false;
+	const cleanId = anchorId.replace(/^#/, "");
+	if (!cleanId) return false;
+
+	let el = document.getElementById(cleanId);
+	if (!el) {
+		try {
+			const escaped = CSS.escape(cleanId);
+			el = document.querySelector(`[name="${escaped}"]`) || document.querySelector(`[id="${escaped}"]`);
+		} catch (_) {}
+	}
+
+	if (el) {
+		el.scrollIntoView({ behavior: "smooth", block: "start" });
+		return true;
+	}
+	return false;
 }
 
 // 监听输入变化
@@ -1214,13 +1237,34 @@ $(document).on("click", "a", function (e) {
 		return;
 	}
 
+	// 页面内纯 DOM 锚点跳转 (如 #LDOCE6_weather_1)
+	if (href.startsWith("#") && href.length > 1) {
+		if (scrollToAnchor(href)) {
+			e.preventDefault();
+			return;
+		}
+	}
+
 	// 兼容旧 entry:// 协议
 	if (href.startsWith("entry://")) {
 		e.preventDefault();
-		const word = safeDecodeURIComponent(href.slice("entry://".length));
+		const raw = safeDecodeURIComponent(href.slice("entry://".length));
+		const hashIdx = raw.indexOf("#");
+		let word = raw;
+		let anchorId = "";
+		if (hashIdx !== -1) {
+			word = raw.substring(0, hashIdx);
+			anchorId = raw.substring(hashIdx + 1);
+		}
+
+		if (!word && anchorId) {
+			scrollToAnchor(anchorId);
+			return;
+		}
+
 		if (word) {
 			$("#word").val(word);
-			queryMdx(word);
+			queryMdx(word, true, anchorId);
 		}
 		return;
 	}
@@ -1244,8 +1288,15 @@ $(document).on("click", "a", function (e) {
 	if (dictEntryMatch) {
 		e.preventDefault();
 		const word = safeDecodeURIComponent(dictEntryMatch[1]);
-		$("#word").val(word);
-		queryDictEntryByUrl(pathAndQuery, word);
+		const anchorId = url.hash ? url.hash.slice(1) : "";
+		if (!word && anchorId) {
+			scrollToAnchor(anchorId);
+			return;
+		}
+		if (word) {
+			$("#word").val(word);
+			queryMdx(word, true, anchorId);
+		}
 		return;
 	}
 
