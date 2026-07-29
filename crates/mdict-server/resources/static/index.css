@@ -926,7 +926,33 @@ footer span {
 	letter-spacing: 0.02em !important;
 }
 
-/* 词性与语法 Badge (PoS / Gram / Register) */
+/* 词头频级指示 (Level: ●●○) */
+#mdx-resp .level,
+#mdx-resp .LEVEL {
+	display: inline-block !important;
+	color: #38bdf8 !important;
+	font-size: 0.88rem !important;
+	margin: 0 6px 0 6px !important;
+	vertical-align: middle !important;
+}
+
+/* 词头频率 Badge (Freq: W1 / W2 / W3 / S1 ...) */
+#mdx-resp .freq,
+#mdx-resp .FREQ {
+	display: inline-block !important;
+	color: #f472b6 !important;
+	background: rgba(244, 114, 182, 0.12) !important;
+	border: 1px solid rgba(244, 114, 182, 0.3) !important;
+	padding: 1px 6px !important;
+	border-radius: 4px !important;
+	font-size: 0.78rem !important;
+	font-weight: 700 !important;
+	margin: 0 6px 0 4px !important;
+	vertical-align: middle !important;
+	line-height: 1.2 !important;
+}
+
+/* 词性 Badge (PoS / Register) */
 #mdx-resp .pos,
 #mdx-resp .POS,
 #mdx-resp .register,
@@ -940,17 +966,28 @@ footer span {
 	font-size: 0.82rem !important;
 	font-weight: 600 !important;
 	font-style: italic !important;
-	margin: 2px 6px 2px 0 !important;
+	margin: 2px 6px 2px 4px !important;
+	vertical-align: middle !important;
+	line-height: 1.2 !important;
 }
 
+/* 语法与语体标签 (Gram / Registerlab / Prop) */
 #mdx-resp .registerlab,
 #mdx-resp .REGISTERLAB,
 #mdx-resp .prop,
-#mdx-resp .PROP,
+#mdx-resp .PROP {
+	color: #f472b6 !important;
+	margin: 0 6px 0 4px !important;
+	display: inline-block !important;
+	font-weight: 600 !important;
+}
+
 #mdx-resp .gram,
 #mdx-resp .GRAM {
-	margin-right: 6px !important;
+	color: #fbbf24 !important;
+	margin: 0 8px 0 4px !important;
 	display: inline-block !important;
+	font-weight: 600 !important;
 }
 
 /* 义项编号 Badge (恢复经典红色圆圈数字 🔴 1, 🔴 2...) */
