@@ -650,10 +650,11 @@ async fn resolve_static_file(
     if let (Ok(canonical), Ok(base_canonical)) = (
         fs::canonicalize(&static_file).await,
         fs::canonicalize(base_static_dir).await,
-    ) && !canonical.starts_with(&base_canonical)
-    {
-        tracing::warn!("Path escape attempt blocked: {:?}", static_file);
-        return None;
+    ) {
+        if !canonical.starts_with(&base_canonical) {
+            tracing::warn!("Path escape attempt blocked: {:?}", static_file);
+            return None;
+        }
     }
 
     let metadata = match fs::metadata(&static_file).await {
