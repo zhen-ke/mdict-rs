@@ -4,7 +4,7 @@ use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
 use memmap2::{Advice, MmapOptions};
-use rusqlite::{params, params_from_iter, Connection, ToSql, Transaction};
+use rusqlite::{Connection, ToSql, Transaction, params, params_from_iter};
 
 use crate::mdict::mdx::Mdx;
 use tracing::{info, warn};
@@ -12,6 +12,11 @@ use tracing::{info, warn};
 const INDEX_SCHEMA_VERSION: i64 = 4;
 const META_TABLE: &str = "MDX_META";
 const META_SCHEMA_VERSION: &str = "schema_version";
+
+/// MDX_INDEX 一行在批量插入时的内存形态：
+/// `(text, normalized, record_offset, record_length, block_offset, block_size, block_dsize)`
+/// 提取该 alias 以满足 clippy `type_complexity` 门禁，也令调用点更易读。
+type IndexChunkRow = (String, Option<String>, i64, i64, i64, i64, i64);
 const META_SOURCE_SIZE: &str = "source_size";
 const META_SOURCE_MTIME: &str = "source_mtime";
 
@@ -218,8 +223,7 @@ pub fn mdx_to_sqlite(file: &Path, fts_enabled: bool) -> anyhow::Result<()> {
     // 运行在 `MAX_VARIABLE_NUMBER=999` 的旧版上超限，`flush_index_chunk` 会以
     // 原生 SQLite 错误指出，可опат减回退。
     const INSERT_CHUNK: usize = 4000;
-    let mut chunk: Vec<(String, Option<String>, i64, i64, i64, i64, i64)> =
-        Vec::with_capacity(INSERT_CHUNK);
+    let mut chunk: Vec<IndexChunkRow> = Vec::with_capacity(INSERT_CHUNK);
     let mut fts_chunk: Vec<String> = Vec::with_capacity(INSERT_CHUNK);
 
     for r in mdx.entries() {
@@ -293,10 +297,7 @@ pub fn mdx_to_sqlite(file: &Path, fts_enabled: bool) -> anyhow::Result<()> {
 
 /// 把一chunk（最多 100 行）以单条多 VALUES 语句写入 MDX_INDEX，
 /// 减少 SQLite 调用/解析轮次。块为空时直接返回。
-fn flush_index_chunk(
-    tx: &Transaction,
-    chunk: &mut Vec<(String, Option<String>, i64, i64, i64, i64, i64)>,
-) -> anyhow::Result<()> {
+fn flush_index_chunk(tx: &Transaction, chunk: &mut Vec<IndexChunkRow>) -> anyhow::Result<()> {
     if chunk.is_empty() {
         return Ok(());
     }
@@ -449,7 +450,7 @@ fn should_index_in_fts(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{flush_index_chunk, should_index_in_fts};
+    use super::{IndexChunkRow, flush_index_chunk, should_index_in_fts};
     use rusqlite::Connection;
 
     fn open_index_db() -> Connection {
@@ -512,7 +513,7 @@ mod tests {
     fn flush_index_chunk_noop_on_empty() {
         let mut conn = open_index_db();
         let tx = conn.transaction().expect("tx");
-        let mut chunk: Vec<(String, Option<String>, i64, i64, i64, i64, i64)> = vec![];
+        let mut chunk: Vec<IndexChunkRow> = vec![];
         flush_index_chunk(&tx, &mut chunk).expect("flush empty");
         tx.commit().expect("commit");
         let count: i64 = conn

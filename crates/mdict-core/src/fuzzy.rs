@@ -16,7 +16,7 @@
 //! 这一套即 onedict 的 `Index::suggest` 做法，照搬到 mdict 的 `MDX_INDEX`
 //! schema 上。不改索引 schema —— 只复用现有 `idx_mdx_normalized`。
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use crate::normalize::{canonical_normalize, prefix_upper};
 

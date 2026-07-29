@@ -1,0 +1,7 @@
+# 将本地开发工具链与 CI / Docker (rust:1.85-alpine) 对齐，避免本地 nightly
+# 通过而 stable CI 失败的历史问题（见 commit 24e277e / ad31395）。
+# 1.85 是首个稳定 Rust Edition 2024 的版本，也是 Dockerfile 的基线。
+[toolchain]
+channel = "1.85"
+components = ["rustfmt", "clippy"]
+profile = "default"

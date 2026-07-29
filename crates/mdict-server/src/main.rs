@@ -12,6 +12,7 @@ use axum::{
     routing::{get, post},
 };
 use std::error::Error;
+use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
@@ -81,6 +82,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let state = AppState::new(dict_dir, static_dir.clone(), dict_files);
 
     let app = Router::new()
+        // 轻量存活探针：容器编排 / NAS Health Check 使用，不走 AppState、不占 Semaphore。响应体极小。
+        .route("/health", get(|| async { "ok\n" }))
         .route("/query", post(handle_query))
         .route("/suggest", get(handle_suggest))
         .route("/suggest/fuzzy", get(handle_suggest_fuzzy))
@@ -98,7 +101,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .route("/resource/{id}/{*path}", get(handle_dict_resource))
         // 静态文件 + 词典资源处理 (音频、图片等)
         .fallback(handle_resource)
+        // 层顺序：请求 Compression -> Trace -> handler，响应 handler -> Trace -> Compression。
+        // Compression 作为最外层，对全部响应（含错误响应）走 Accept-Encoding 协商压缩；
+        // TraceLayer 在内层，其 span 包住 handler 时间（不抖 Compression 开销）。
         .layer(TraceLayer::new_for_http())
+        .layer(CompressionLayer::new())
         .with_state(state);
 
     let port = std::env::var("PORT")
@@ -109,10 +116,42 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let addr = format!("{}:{}", host, port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-    let display_host = if host == "0.0.0.0" { "127.0.0.1" } else { &host };
+    let display_host = if host == "0.0.0.0" {
+        "127.0.0.1"
+    } else {
+        &host
+    };
     info!("app serve on http://{}:{}", display_host, port);
 
-    axum::serve(listener, app).await?;
+    // 优雅停机：收到 Ctrl-C / SIGTERM 后，拒绝新连接、等待在途查询完成再退出。
+    // axum::serve 默认 30s 超时。避免 docker stop 的内核 SIGKILL 硬丝在途请求。
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     Ok(())
+}
+
+/// 监听 Ctrl-C 与（Unix）SIGTERM，任一到达即触发优雅停机。
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("install Ctrl-C signal handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM signal handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => info!("Received Ctrl-C, initiating graceful shutdown"),
+        _ = terminate => info!("Received SIGTERM, initiating graceful shutdown"),
+    }
 }

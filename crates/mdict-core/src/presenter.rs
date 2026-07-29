@@ -320,7 +320,7 @@ fn escape_html_attr(s: &str) -> String {
 mod tests {
     use std::collections::HashSet;
 
-    use super::{dedup_styles, render_aggregate_html, sanitize_dict_html, AggregateSection};
+    use super::{AggregateSection, dedup_styles, render_aggregate_html, sanitize_dict_html};
 
     fn stripped(input: &str) -> String {
         sanitize_dict_html(input)

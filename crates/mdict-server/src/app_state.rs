@@ -12,7 +12,7 @@ use rusqlite::OpenFlags;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::config::{DictConfig, DictInfo};
-use mdict_core::mdict::reader::{per_reader_cache_budget, MdxReader};
+use mdict_core::mdict::reader::{MdxReader, per_reader_cache_budget};
 
 /// Entry cache 的字节预算上限。moka 的 `max_capacity` 配合 `weigher` 后语义是
 /// “所有缓存项的 weight 之和 ≤ max_capacity”，故这里把 `data.len()` 作为 weight，

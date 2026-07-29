@@ -1,2 +1,5 @@
+# group_imports 曾设为 "StdExternalCrate"，但该选项是 nightly-only：
+# 在 stable rustfmt 上会被静默忽略（每次 fmt 打印三行 warning），且其期望
+# 的分组排序与 stable 默认排序不一致，导致 `cargo fmt --check` 持续漂移。
+# 已移除：改让 stable rustfmt 用默认按字母排序，由 CI 的 fmt 门禁锁定。
 reorder_imports = true
-group_imports = "StdExternalCrate"

@@ -33,4 +33,9 @@ ENV MDX_DICT_DIR=/app/mdict
 ENV BIND_ADDR=0.0.0.0
 ENV PORT=8181
 
+# 容器存活探针：进程仍在但服务粘死（池毒、semaphore 耗尽、索引卡死）时也能被编排系统发现。
+# alpine 自带 busybox wget，无需额外安装。
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:8181/health || exit 1
+
 CMD ["/app/mdict-rs"]
