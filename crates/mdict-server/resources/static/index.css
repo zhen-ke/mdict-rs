@@ -1052,21 +1052,24 @@ footer span {
 	box-shadow: none !important;
 }
 
+#mdx-resp expen,
+#mdx-resp .expen,
+#mdx-resp .EXPEN,
 #mdx-resp .example exaen,
 #mdx-resp .EXAMPLE,
 #mdx-resp .exa {
-	color: #f1f5f9;
-	font-family: var(--font-serif);
-	display: inline;
-	margin-right: 8px;
+	color: #f1f5f9 !important;
+	font-family: var(--font-serif) !important;
+	display: inline !important;
+	margin-right: 8px !important;
 }
 
 #mdx-resp expcn,
 #mdx-resp .expcn,
 #mdx-resp .EXPCN {
-	color: #94a3b8;
-	font-family: var(--font-serif);
-	display: inline;
+	color: #94a3b8 !important;
+	font-family: var(--font-sans) !important;
+	display: inline !important;
 }
 
 /* 提高括号注释/解释的亮度和对比度 */
