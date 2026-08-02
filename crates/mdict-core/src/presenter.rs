@@ -106,6 +106,14 @@ fn render_dict_iframe_srcdoc(
     doc.push_str(
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
     );
+    // iframe 内部文档基础 reset：
+    // - 清零 body 默认 margin（否则内容底部被裁出 iframe 内部滚动条，
+    //   且与桥接脚本的高度测量不一致——测量不含 body margin）。
+    // - 禁止 iframe 内部滚动：词典内容全部展开，高度由 postMessage 上报
+    //   父页，滚动由父页面统一承载（避免双滚动条）。
+    doc.push_str(
+        "<style>html,body{margin:0;padding:0;overflow:hidden;}</style>",
+    );
     // 词典自带样式（去重后）放进 <head>
     doc.push_str(&head_css);
     // 词典配置文件里声明的自定义 CSS（位于自带样式之后，可覆盖自带样式）
@@ -145,13 +153,25 @@ fn render_dict_iframe_srcdoc(
         r#"<script>
 (function () {{
   function report() {{
-    var h = document.documentElement.scrollHeight;
+    var el = document.querySelector('.mdict-dict-scope') || document.body;
+    if (!el) return;
+    var rect = el.getBoundingClientRect();
+    var style = window.getComputedStyle(el);
+    var marginTop = parseFloat(style.marginTop) || 0;
+    var marginBottom = parseFloat(style.marginBottom) || 0;
+    // 取 max(scrollHeight, rect.height)：rect.height 在内容高于 iframe 视口时
+    // 会被 overflow:hidden 裁剪而虚高/卡住；scrollHeight 是元素自身内容高度，
+    // 不受视口裁剪影响，折叠时正确缩小、展开时正确反映全高。
+    var contentH = Math.max(el.scrollHeight, rect.height + marginTop + marginBottom);
+    var h = Math.ceil(contentH);
     try {{ parent.postMessage({{ mdictFrame: true, dictId: "{}", height: h }}, "*"); }} catch (e) {{}}
   }}
-  if (window.ResizeObserver) {{
-    new ResizeObserver(report).observe(document.documentElement);
+  var targetEl = document.querySelector('.mdict-dict-scope') || document.body;
+  if (window.ResizeObserver && targetEl) {{
+    new ResizeObserver(report).observe(targetEl);
   }}
   window.addEventListener('load', report);
+  document.addEventListener('DOMContentLoaded', report);
   setTimeout(report, 50);
   setTimeout(report, 300);
   document.addEventListener('click', function (e) {{
