@@ -172,29 +172,54 @@ function enhanceAggregateResult() {
 }
 
 /**
- * 初始化词典内置交互 (音节整理、例句折叠、知识框折叠、数字序号例句展开等)
+ * 词典内置交互（音节整理、例句折叠、知识框折叠等）已随词典条目一起被放进
+ * 独立 iframe 沙箱内执行——词典自带的脚本（含 LDOCE lm6 逻辑）在各自
+ * iframe 文档里自行初始化并作用于自己的 DOM。
+ *
+ * 父页面是 opaque-origin 沙箱（sandbox 未开 allow-same-origin），无法读取
+ * iframe 内部 DOM，因此这里不再从父页操作词典内容；跨 iframe 仅通过
+ * postMessage 上报高度（见 setupFrameResizeListener）。
  */
 function initLM6Content() {
-	if (window.d8018d6852bc49e3b3e655364cf1439c) {
-		try {
-			const lm6 = window.d8018d6852bc49e3b3e655364cf1439c;
-			lm6.processContent();
-			lm6.initBoxToggle();
-			lm6.initHyphenationToggle();
-			lm6.initSquareToggle();
-			lm6.initSensenumToggle();
-			lm6.initDerivToggle();
-			lm6.initHoverEffects();
-		} catch (err) {
-			console.warn("lm6 init error:", err);
-		}
-	}
+	// no-op：词典脚本在各自 iframe 沙箱内运行，无需父页介入。
 }
 
 /**
- * 滚动时高亮当前可见词典对应的导航 pill。
- * 每次查询都会重建 #mdx-resp 内容，因此先拆掉上一次的 observer。
+ * 监听词典 iframe 内部通过 postMessage 上报的消息：
+ * - mdictFrame: 内容高度（opaque-origin 沙箱下父页无法读取内部尺寸）
+ * - mdictNav: 内部路由链接点击（sound://、entry://、/dict/...），转发到
+ *   主页面统一处理（发音/跳词/锚点）
  */
+function setupFrameResizeListener() {
+	window.addEventListener("message", function (event) {
+		const msg = event.data;
+		if (!msg || typeof msg !== "object") return;
+
+		// 高度上报
+		if (msg.mdictFrame === true) {
+			if (typeof msg.dictId !== "string" || typeof msg.height !== "number") return;
+			// 高度上限保护，避免异常上报导致布局失控。
+			const h = Math.max(40, Math.min(msg.height, 100000));
+			const $iframe = $(
+				'#mdx-resp .mdict-dict-iframe[data-dict-id="' +
+					msg.dictId.replace(/"/g, "") +
+					'"]',
+			);
+			if ($iframe.length) {
+				$iframe.css("height", h + "px");
+			}
+			return;
+		}
+
+		// 内部链接转发
+		if (msg.mdictNav === true) {
+			if (typeof msg.href !== "string") return;
+			handleInternalNavLink(msg.href);
+		}
+	});
+}
+
+
 let dictNavObserver = null;
 function teardownDictNavObserver() {
 	if (dictNavObserver) {
@@ -617,6 +642,7 @@ window.addEventListener("popstate", handlePopState);
 $(document).ready(() => {
 	initHistoryDropdown();
 	initDictFilter();
+	setupFrameResizeListener();
 
 	// 调试开关：URL 含 ?debug 时露出词典 ID / 调试信息
 	if (location.search.indexOf("debug") !== -1) {
@@ -1225,29 +1251,37 @@ $(document).on("keydown", "#word", (e) => {
 // =============================================
 // 链接点击处理
 // =============================================
-$(document).on("click", "a", function (e) {
-	const href = $(this).attr("href");
+
+/**
+ * 处理内部路由链接（sound://、entry://、锚点、/dict/{id}/...、/resource/...、
+ * 旧式 /word）。同时被父页 a 点击委托与 iframe 沙箱内转发（postMessage
+ * mdictNav）调用，保证词典 iframe 内的链接行为与主页面一致。
+ * @param {string} href 链接地址
+ * @param {Event} [e] 可选事件对象；存在时 preventDefault
+ */
+function handleInternalNavLink(href, e) {
 	if (!href) return;
+	const prevent = () => e && e.preventDefault && e.preventDefault();
 
 	// 兼容旧 sound:// 协议
 	if (href.startsWith("sound://")) {
-		e.preventDefault();
+		prevent();
 		const audioPath = href.replace("sound://", "/");
 		playAudioUrl(audioPath);
-		return;
+		return true;
 	}
 
 	// 页面内纯 DOM 锚点跳转 (如 #LDOCE6_weather_1)
 	if (href.startsWith("#") && href.length > 1) {
 		if (scrollToAnchor(href)) {
-			e.preventDefault();
-			return;
+			prevent();
+			return true;
 		}
 	}
 
 	// 兼容旧 entry:// 协议
 	if (href.startsWith("entry://")) {
-		e.preventDefault();
+		prevent();
 		const raw = safeDecodeURIComponent(href.slice("entry://".length));
 		const hashIdx = raw.indexOf("#");
 		let word = raw;
@@ -1259,25 +1293,25 @@ $(document).on("click", "a", function (e) {
 
 		if (!word && anchorId) {
 			scrollToAnchor(anchorId);
-			return;
+			return true;
 		}
 
 		if (word) {
 			$("#word").val(word);
 			queryMdx(word, true, anchorId);
 		}
-		return;
+		return true;
 	}
 
 	let url;
 	try {
 		url = new URL(href, window.location.origin);
 	} catch (_) {
-		return;
+		return false;
 	}
 
 	if (url.origin !== window.location.origin) {
-		return;
+		return false;
 	}
 
 	const path = url.pathname;
@@ -1286,37 +1320,37 @@ $(document).on("click", "a", function (e) {
 	// 新路由: /dict/{id}/entry/{word}
 	const dictEntryMatch = path.match(/^\/dict\/[^/]+\/entry\/(.+)$/);
 	if (dictEntryMatch) {
-		e.preventDefault();
+		prevent();
 		const word = safeDecodeURIComponent(dictEntryMatch[1]);
 		const anchorId = url.hash ? url.hash.slice(1) : "";
 		if (!word && anchorId) {
 			scrollToAnchor(anchorId);
-			return;
+			return true;
 		}
 		if (word) {
 			$("#word").val(word);
 			queryMdx(word, true, anchorId);
 		}
-		return;
+		return true;
 	}
 
 	// 新路由: /dict/{id}/audio/{path}
 	if (/^\/dict\/[^/]+\/audio\/.+/.test(path)) {
-		e.preventDefault();
+		prevent();
 		playAudioUrl(pathAndQuery);
-		return;
+		return true;
 	}
 
 	// 旧路由音频兼容: /resource/{id}/{path}
 	if (/^\/resource\/[^/]+\/.+\.(mp3|wav|ogg|oga|flac|aac|m4a)$/i.test(path)) {
-		e.preventDefault();
+		prevent();
 		playAudioUrl(pathAndQuery);
-		return;
+		return true;
 	}
 
 	// 新路由资源直接放行，不拦截
 	if (/^\/dict\/[^/]+\/res\/.+/.test(path)) {
-		return;
+		return false;
 	}
 
 	// 兼容旧内部词条链接: /word
@@ -1325,13 +1359,20 @@ $(document).on("click", "a", function (e) {
 		!path.startsWith("/#") &&
 		!path.startsWith("/api/")
 	) {
-		e.preventDefault();
+		prevent();
 		const word = safeDecodeURIComponent(path.slice(1));
 		if (word) {
 			$("#word").val(word);
 			queryMdx(word);
 		}
+		return true;
 	}
+
+	return false;
+}
+
+$(document).on("click", "a", function (e) {
+	handleInternalNavLink($(this).attr("href"), e);
 });
 
 // =============================================

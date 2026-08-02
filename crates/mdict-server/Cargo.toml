@@ -31,3 +31,10 @@ serde_json = "1.0.148"
 toml = "0.8"
 rayon = "1"
 moka = { version = "0.12.15", features = ["sync"] }
+# 后台建索引线程池：可控线程数 + 低优先级，避免在弱设备上吃满核
+# 抢占 Web 服务的查询线程。
+thread-priority = "0.16"
+# 词典目录热更新：监听新增/变更的 .mdx/.mdd/.toml，增量建索引并热替换 catalog。
+notify = "6"
+# catalog 热替换的 lock-free 双 buffer：查询热路径读不取锁、热更新写原子换论文。
+arc-swap = "1"

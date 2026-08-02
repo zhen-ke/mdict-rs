@@ -4,7 +4,7 @@ use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
 use memmap2::{Advice, MmapOptions};
-use rusqlite::{Connection, ToSql, Transaction, params, params_from_iter};
+use rusqlite::{params, params_from_iter, Connection, ToSql, Transaction};
 
 use crate::mdict::mdx::Mdx;
 use tracing::{info, warn};
@@ -36,11 +36,53 @@ pub struct IndexJob {
     pub path: PathBuf,
     /// 是否为该词典构建 FTS5 全文索引（通常对 .mdd 资源词典关闭）
     pub fts_enabled: bool,
+    /// 此词典 FTS5 建表用的分词器。来自配置，默认 [`FtsTokenizer::Unicode61`]。
+    pub fts_tokenizer: FtsTokenizer,
 }
 
 impl IndexJob {
-    pub fn new(path: PathBuf, fts_enabled: bool) -> Self {
-        Self { path, fts_enabled }
+    pub fn new(path: PathBuf, fts_enabled: bool, fts_tokenizer: FtsTokenizer) -> Self {
+        Self {
+            path,
+            fts_enabled,
+            fts_tokenizer,
+        }
+    }
+}
+
+/// FTS5 分词器选择。枚举本身是 SQL 拼接的唯一来源——见 [`as_fts_tokenize`] ——
+/// 故不接受任何外部字符串直接拼入 `tokenize='...'`，规避 SQL 注入。
+///
+/// 默认 [`Unicode61`]（与项目既有行为一致）。[`Trigram`] 是 SQLite 3.34+
+/// 内建的 3-字符滑动窗口分词器，对中文等无空格分隔 CJK 语料的全文检索
+/// 召回有明显提升。Jieba/复杂分词是后续另一路（需 C tokenizer ABI），
+/// 此处不涵盖。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FtsTokenizer {
+    /// `unicode61 remove_diacritics 2`：适合空格分隔语种；对中文拆为单字 token。
+    #[default]
+    Unicode61,
+    /// `trigram`：3-字符滑动窗口，适合 CJK 子串检索（需 SQLite 3.34+）。
+    Trigram,
+}
+
+impl FtsTokenizer {
+    /// 从配置字符串解析。未识别名称返回 `None`，调用方应回退到默认。
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "unicode61" | "unicode" => Some(FtsTokenizer::Unicode61),
+            "trigram" | "ngram" => Some(FtsTokenizer::Trigram),
+            _ => None,
+        }
+    }
+
+    /// 渲染为 FTS5 `tokenize='...'` 子句中的安全字符串。值由枚举变体产出，
+    /// 不含任何外部输入，可直接零转义拼进 SQL。
+    pub fn as_fts_tokenize(&self) -> &'static str {
+        match self {
+            FtsTokenizer::Unicode61 => "unicode61 remove_diacritics 2",
+            FtsTokenizer::Trigram => "trigram",
+        }
     }
 }
 
@@ -54,16 +96,33 @@ pub fn db_path(dict_file: &Path) -> PathBuf {
 /// 调用方。调用方可据此在后台任务里做按文件的重试/退避，并把最后一次失败
 /// 写入 `/api/index/status` 可见的字段——避免此前 fire-and-forget 模型下“若
 /// 维一 · 单 .db 永不生成则全程静默 503”的隐性 STL。
-pub fn indexing(jobs: &[IndexJob], reindex: bool) -> Result<(), Vec<(PathBuf, anyhow::Error)>> {
+/// 并行构建索引。
+///
+/// `pool`：可选的独立 rayon 线程池。传入时，多文件并发调度跑在该池上
+/// （而不是 rayon 全局池），从而把「后台建索引」与「查询热路径」的线程
+/// 资源在物理上隔离开：建索引用低优先级、受限数量的线程，查询继续用
+/// 全局池的满核线程。`None` 时回退到 rayon 全局池（保持核心 crate 单
+/// 独可用、不依赖外部线程模型）。
+pub fn indexing(
+    jobs: &[IndexJob],
+    reindex: bool,
+    pool: Option<&rayon::ThreadPool>,
+) -> Result<(), Vec<(PathBuf, anyhow::Error)>> {
     use rayon::prelude::*;
 
-    let failures: Vec<(PathBuf, anyhow::Error)> = jobs
-        .par_iter()
-        .filter_map(|job| match ensure_index(job, reindex) {
-            Ok(()) => None,
-            Err(e) => Some((job.path.clone(), e)),
-        })
-        .collect();
+    let run = || -> Vec<(PathBuf, anyhow::Error)> {
+        jobs.par_iter()
+            .filter_map(|job| match ensure_index(job, reindex) {
+                Ok(()) => None,
+                Err(e) => Some((job.path.clone(), e)),
+            })
+            .collect()
+    };
+
+    let failures: Vec<(PathBuf, anyhow::Error)> = match pool {
+        Some(tp) => tp.install(run),
+        None => run(),
+    };
 
     if failures.is_empty() {
         Ok(())
@@ -110,7 +169,7 @@ pub fn ensure_index(job: &IndexJob, reindex: bool) -> anyhow::Result<()> {
     // 失败”的词典会被 `/api/index/status` 显示为 db_exists=true、up_to_date=false、
     // 看似“仍在建”），失赍路径里主动删除孤儿。重进下一步重试时它会自然再生成。
     let start = std::time::Instant::now();
-    if let Err(e) = mdx_to_sqlite(file, job.fts_enabled) {
+    if let Err(e) = mdx_to_sqlite(file, job.fts_enabled, job.fts_tokenizer) {
         let _ = fs::remove_file(&db_path);
         return Err(e);
     }
@@ -146,7 +205,13 @@ pub fn index_status(file: &Path) -> anyhow::Result<IndexStatus> {
 ///
 /// `fts_enabled`: 是否为此文件构建 FTS5 全文索引（仅对文本词典有意义；
 /// .mdd 资源词典内部会被强制关闭）。
-pub fn mdx_to_sqlite(file: &Path, fts_enabled: bool) -> anyhow::Result<()> {
+/// `fts_tokenizer`: FTS5 建表分词器；其 `tokenize='...'` 子句由枚举渲染，
+/// 不接受外部字符串直接拼入，规避 SQL 注入。
+pub fn mdx_to_sqlite(
+    file: &Path,
+    fts_enabled: bool,
+    fts_tokenizer: FtsTokenizer,
+) -> anyhow::Result<()> {
     let db_file = db_path(file);
     let mut conn = Connection::open(&db_file)?;
     // Tune SQLite for a bulk index build.
@@ -196,17 +261,21 @@ pub fn mdx_to_sqlite(file: &Path, fts_enabled: bool) -> anyhow::Result<()> {
     let fts_allowed = is_text_dict && fts_enabled;
     let mut fts_enabled = false;
     if fts_allowed {
-        match conn.execute(
-            "create virtual table if not exists MDX_FTS using fts5(text, tokenize='unicode61 remove_diacritics 2')",
-            params![],
-        ) {
+        // 安全性：`tokenize='...'` 子句由枚举渲染、不接受外部字符串直接拼接，
+        // 故可零转义拼入。分词器名称未知时 SQLite 会报错被此处的 match 捕获，
+        // 退化为不建 FTS（保持词典仍可用），不会 panic。
+        let tokenize_clause = format!(
+            "create virtual table if not exists MDX_FTS using fts5(text, tokenize='{}')",
+            fts_tokenizer.as_fts_tokenize()
+        );
+        match conn.execute(&tokenize_clause, params![]) {
             Ok(_) => {
                 fts_enabled = true;
             }
             Err(e) => {
                 warn!(
-                    "FTS5 not available, skipping MDX_FTS for {:?}: {}",
-                    file, e
+                    "FTS5 unavailable or tokenizer {:?} unsupported, skipping MDX_FTS for {:?}: {}",
+                    fts_tokenizer, file, e
                 );
             }
         }
@@ -453,7 +522,7 @@ fn should_index_in_fts(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{IndexChunkRow, flush_index_chunk, should_index_in_fts};
+    use super::{flush_index_chunk, should_index_in_fts, IndexChunkRow};
     use rusqlite::Connection;
 
     fn open_index_db() -> Connection {

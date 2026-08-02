@@ -12,7 +12,7 @@ use rusqlite::OpenFlags;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::config::{DictConfig, DictInfo};
-use mdict_core::mdict::reader::{MdxReader, per_reader_cache_budget};
+use mdict_core::mdict::reader::{per_reader_cache_budget, MdxReader};
 
 /// 一本词典索引构建最近一次失败的快照，供 `/api/index/status` 暴露给前端/dashboard。
 ///
@@ -26,15 +26,48 @@ pub struct IndexFailure {
     pub attempts: u32,
 }
 
-/// Entry cache 的字节预算上限。moka 的 `max_capacity` 配合 `weigher` 后语义是
+/// Entry cache 默认字节预算上限。moka 的 `max_capacity` 配合 `weigher` 后语义是
 /// “所有缓存项的 weight 之和 ≤ max_capacity”，故这里把 `data.len()` 作为 weight，
 /// 整个 entry cache 的内存峰值被钉死在这个量级，与单个聚合页大小无关。
-const ENTRY_CACHE_BYTES: u64 = 64 * 1024 * 1024;
-/// Resource cache 的字节预算上限（音频/图片/css…），按字节封顶。
-const RESOURCE_CACHE_BYTES: u64 = 128 * 1024 * 1024;
+const DEFAULT_ENTRY_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+/// Resource cache 默认字节预算上限（音频/图片/css…），按字节封顶。
+const DEFAULT_RESOURCE_CACHE_BYTES: u64 = 128 * 1024 * 1024;
 /// 条目式兜底容量（moka 同时受 `max_capacity` 与 `weigher` 双重约束，取最小）。
-const RESOURCE_CACHE_MAX_ENTRIES: u64 = 4096;
+const DEFAULT_RESOURCE_CACHE_MAX_ENTRIES: u64 = 4096;
 const NEGATIVE_CACHE_SIZE: u64 = 1024;
+
+/// Entry cache 的字节预算上限（可配）。优先 `MDICT_ENTRY_CACHE_BYTES`；
+/// 非正或未设走默认 64 MiB。NAS/树莓派等低内存设备可调小（如 8–16 MiB），
+/// 高内存服务器可调大（如 1 GiB）以提高并发命中率。
+fn entry_cache_bytes() -> u64 {
+    cache_bytes_from_env("MDICT_ENTRY_CACHE_BYTES", DEFAULT_ENTRY_CACHE_BYTES)
+}
+
+/// Resource cache 的字节预算上限（可配）。优先 `MDICT_RESOURCE_CACHE_BYTES`；
+/// 非正或未设走默认 128 MiB。
+fn resource_cache_bytes() -> u64 {
+    cache_bytes_from_env("MDICT_RESOURCE_CACHE_BYTES", DEFAULT_RESOURCE_CACHE_BYTES)
+}
+
+/// Resource cache 的条目数上限（可配）。优先 `MDICT_RESOURCE_CACHE_MAX_ENTRIES`；
+/// 非正或未设走默认 4096。防止海量极小资源（icon / 小字体）漂条数无界。
+fn resource_cache_max_entries() -> u64 {
+    std::env::var("MDICT_RESOURCE_CACHE_MAX_ENTRIES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_RESOURCE_CACHE_MAX_ENTRIES)
+}
+
+/// 解析一个“字节预算”类环境变量：取值必须 > 0，否则回退默认值。
+/// 与 `sqlite_cache_kb()` 同样的严格度一体化。
+fn cache_bytes_from_env(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(default)
+}
 /// 默认每连接 SQLite page cache（`PRAGMA cache_size = -N` 以 KB 计）。64MB 对单
 /// 词典在内存宽裕的桌面场景合适；小内存 ARM（1-2GB）部署多词典时建议设小
 /// `MDICT_SQLITE_CACHE_KB` 环境变量，或同时调低池上限 `MDICT_SQLITE_POOL_MAX`，
@@ -110,6 +143,9 @@ struct DictCatalog {
     id_to_primary_text: HashMap<String, PathBuf>,
     dict_id_map: HashMap<String, Vec<PathBuf>>,
     path_to_id: HashMap<PathBuf, String>,
+    /// dict_id → 同名词典文件夹路径（`mdict/<词典主文件名>/`），存放该词典
+    /// 的 css/js/图片等外部资源；无同名文件夹的词典不在此表中。
+    dict_folders_by_id: HashMap<String, PathBuf>,
 }
 
 impl DictCatalog {
@@ -132,7 +168,7 @@ impl DictCatalog {
         mdd.extend(mdx);
         let dict_resource_files = mdd;
 
-        let mut dict_configs_by_path = HashMap::new();
+        let mut dict_configs_by_path: HashMap<PathBuf, DictConfig> = HashMap::new();
         for file in &dict_text_files {
             if let Some(cfg) = DictConfig::load(file) {
                 dict_configs_by_path.insert(file.clone(), cfg);
@@ -171,6 +207,23 @@ impl DictCatalog {
             }
         }
 
+        // 同名词典文件夹：`mdict/<词典主文件名>/`（与主 .mdx 同目录）。词典
+        // 作者自带的 css/js/图片等外部资源放在这里，资源请求时优先于 static
+        // fallback 加载（优先级：MDD 索引 > 词典文件夹 > static 目录）。
+        let mut dict_folders_by_id = HashMap::new();
+        for (id, primary_text) in &id_to_primary_text {
+            let Some(stem) = primary_text.file_stem() else {
+                continue;
+            };
+            let folder = primary_text
+                .parent()
+                .map(|p| p.join(stem))
+                .unwrap_or_else(|| PathBuf::from(stem));
+            if folder.is_dir() {
+                dict_folders_by_id.insert(id.clone(), folder);
+            }
+        }
+
         Self {
             dict_text_files,
             dict_resource_files,
@@ -179,6 +232,7 @@ impl DictCatalog {
             id_to_primary_text,
             dict_id_map,
             path_to_id,
+            dict_folders_by_id,
         }
     }
 }
@@ -207,18 +261,18 @@ impl RuntimeState {
             blocking_query_slots: Arc::new(Semaphore::new(max_concurrent_blocking_queries)),
             entry_cache: Cache::builder()
                 // 按字节封顶：每项的 weight = data.len()，几条巨型聚合页也不会
-                // 让 entry cache 漂出 ENTRY_CACHE_BYTES。
-                .max_capacity(ENTRY_CACHE_BYTES)
+                // 让 entry cache 漂出预算。预算可经 MDICT_ENTRY_CACHE_BYTES 调。
+                .max_capacity(entry_cache_bytes())
                 .weigher(|_k, v: &CachedPayload| u32::try_from(v.data.len()).unwrap_or(u32::MAX))
                 .time_to_live(ENTRY_CACHE_TTL)
                 .build(),
             resource_cache: Cache::builder()
-                .max_capacity(RESOURCE_CACHE_BYTES)
+                .max_capacity(resource_cache_bytes())
                 // 字节预算是真正的约束；同时再设一个条目数上限，防止海量极小
                 // 资源（icon/小字体）把条数推到无界（moka 取两约束的较小值）。
                 .weigher(|_k, v: &CachedPayload| u32::try_from(v.data.len()).unwrap_or(u32::MAX))
                 .time_to_live(RESOURCE_CACHE_TTL)
-                .max_capacity(RESOURCE_CACHE_MAX_ENTRIES)
+                .max_capacity(resource_cache_max_entries())
                 .build(),
             negative_cache: Cache::builder()
                 .max_capacity(NEGATIVE_CACHE_SIZE)
@@ -367,6 +421,12 @@ impl AppState {
             .dict_configs_by_path
             .get(dict_path)
             .and_then(|cfg| cfg.container_class.clone())
+    }
+
+    /// 返回词典的同名文件夹路径（`mdict/<词典主文件名>/`），用于加载词典
+    /// 作者自带的 css/js/图片等外部资源。无同名文件夹时返回 `None`。
+    pub fn get_dict_folder(&self, dict_id: &str) -> Option<PathBuf> {
+        self.catalog.dict_folders_by_id.get(dict_id).cloned()
     }
 
     fn db_path(dict_file: &Path) -> PathBuf {

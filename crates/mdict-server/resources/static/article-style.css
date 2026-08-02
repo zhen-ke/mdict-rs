@@ -1,0 +1,95 @@
+/* ============================================================
+   article-style.css — 全局词典微调层
+   ============================================================
+   每本词典的条目在自己的 iframe 沙箱文档里渲染，本文件会被注入每个
+   iframe 文档的 <head>（位于词典自带样式之后、权重最高），用于在不改动
+   词典自带样式的前提下统一各词典的视觉：
+
+   - 字体、字号、行距
+   - 链接、音标、例句等通用元素配色
+   - 容器内边距
+
+   所有选择器都作用域在 .mdict-dict-body 之下，只影响词典条目内容，
+   不会污染 iframe 外部的主页面。用户可自行编辑本文件微调外观。
+   ============================================================ */
+
+.mdict-dict-body {
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+		"Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB",
+		"Microsoft YaHei", sans-serif;
+	font-size: 15px;
+	line-height: 1.65;
+	color: #dbe2ec;
+	word-break: break-word;
+	-webkit-font-smoothing: antialiased;
+}
+
+/* 统一容器内边距，避免不同词典自带 padding 差异导致观感不一 */
+.mdict-dict-body {
+	padding: 16px 20px;
+	overflow-wrap: break-word;
+}
+
+/* 链接统一配色（不影响词典为链接加的下划线/图标） */
+.mdict-dict-body a {
+	color: #4da3ff;
+	text-decoration: none;
+}
+.mdict-dict-body a:hover {
+	text-decoration: underline;
+}
+
+/* 音标/例句等通用元素的基础字号与配色（词典自带样式优先级更高，
+   这里只提供兜底，避免"裸"词典显得突兀） */
+.mdict-dict-body .pron,
+.mdict-dict-body .amevarpron {
+	font-size: 0.95em;
+	color: #8ea4bf;
+}
+
+.mdict-dict-body .example,
+.mdict-dict-body .colloexa,
+.mdict-dict-body .gramexa {
+	font-style: italic;
+	color: #aab8c8;
+}
+
+/* 词头/标签的统一观感 */
+.mdict-dict-body .entry {
+	line-height: 1.7;
+}
+
+/* 图片资源上限宽，避免超宽图撑破卡片 */
+.mdict-dict-body img {
+	max-width: 100%;
+	height: auto;
+}
+
+/* 表格在窄容器内可横向滚动 */
+.mdict-dict-body table {
+	display: block;
+	max-width: 100%;
+	overflow-x: auto;
+}
+
+/* 代码/音标块背景统一（不强制，词典自带优先） */
+.mdict-dict-body code,
+.mdict-dict-body kbd {
+	font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+	font-size: 0.92em;
+}
+
+/* 深色主题下的常见 LDOCE 系配色微调（可自行删除/覆盖） */
+.mdict-dict-body .ldoceEntry,
+.mdict-dict-body .entry {
+	color: inherit;
+}
+
+/* 让词典自带的标题字号不至于过大/过小失衡 */
+.mdict-dict-body h1,
+.mdict-dict-body h2,
+.mdict-dict-body h3 {
+	line-height: 1.35;
+	margin-top: 0.8em;
+	margin-bottom: 0.4em;
+}

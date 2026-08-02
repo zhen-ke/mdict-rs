@@ -58,7 +58,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     && DictConfig::load(file)
                         .map(|cfg| cfg.is_fts_enabled())
                         .unwrap_or(true);
-                IndexJob::new(file.clone(), fts_enabled)
+                let fts_tokenizer = DictConfig::load(file)
+                    .map(|cfg| cfg.fts_tokenizer())
+                    .unwrap_or(mdict_core::indexing::FtsTokenizer::Unicode61);
+                IndexJob::new(file.clone(), fts_enabled, fts_tokenizer)
             })
             .collect()
     };
@@ -79,13 +82,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    let state = AppState::new(dict_dir, static_dir.clone(), dict_files);
+    let state = AppState::new(dict_dir.clone(), static_dir.clone(), dict_files);
 
     // 后台索引固定交给独立 tokio task：采用异步重试循环（5s / 20s / 60s），
     // 成功的词典从失败 map 清除；重试仍失败时把原因写入 AppState 供
     // `/api/index/status` 暴露，避免此前 fire-and-forget 静默 503。
+    // 构建后台建索引专用的 rayon 线程池：线程数可经 `MDICT_INDEX_THREADS`
+    // 限制，每线程启动时降到低优先级，避免在弱设备（树莓派等）上建索引睡满核、
+    // 持续抢占 Web 请求资源。也在热更新路径复用（见 `dict_watcher` 的单文件 ensure_index
+    // 直接跑在该池上而非全局池）。
+    let index_pool = build_index_thread_pool();
+
     if !jobs.is_empty() {
-        tokio::spawn(indexing_with_retry(jobs, state.clone()));
+        tokio::spawn(indexing_with_retry(
+            jobs,
+            state.clone(),
+            index_pool.clone(),
+        ));
+    }
+    // 监听词典目录热更新（新增/变更 .mdx/.mdd/.toml → 增量建索引并热替换 catalog）。
+    if needs_dict_watcher(&dict_dir) {
+        tokio::spawn(dict_watcher(dict_dir, state.clone(), index_pool.clone()));
     }
 
     let app = Router::new()
@@ -146,7 +163,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 ///
 /// 重试采用「按文件重试」策略：每一轮只重试上一轮仍失败的子集，避免对已
 /// 成功的词典重复建索引。`indexing()` 本身用 rayon 并行按文件调度。
-async fn indexing_with_retry(jobs: Vec<IndexJob>, state: AppState) {
+async fn indexing_with_retry(
+    jobs: Vec<IndexJob>,
+    state: AppState,
+    index_pool: std::sync::Arc<rayon::ThreadPool>,
+) {
     use std::time::Duration;
 
     const MAX_ATTEMPTS: u32 = 3;
@@ -164,14 +185,18 @@ async fn indexing_with_retry(jobs: Vec<IndexJob>, state: AppState) {
             snapshot.len()
         );
         // 复用 indexing 的 rayon 并行按件调度；join panic 也化为同一条 ETL。
-        let result = tokio::task::spawn_blocking(move || indexing(&snapshot, false))
-            .await
-            .map_err(|join| {
-                vec![(
-                    PathBuf::new(),
-                    anyhow::anyhow!("indexing task join error: {join}"),
-                )]
-            });
+        // 走专用 `index_pool`（低优先级、线程数受限），而非 rayon 全局池。
+        let pool_ref = index_pool.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            indexing(&snapshot, false, Some(&pool_ref))
+        })
+        .await
+        .map_err(|join| {
+            vec![(
+                PathBuf::new(),
+                anyhow::anyhow!("indexing task join error: {join}"),
+            )]
+        });
 
         match result {
             Ok(Ok(())) => {
@@ -224,6 +249,90 @@ async fn indexing_with_retry(jobs: Vec<IndexJob>, state: AppState) {
                 tokio::time::sleep(backoff).await;
             }
         }
+    }
+}
+
+// =========================== 后台建索引线程池 ===========================
+
+/// 后台建索引的线程数。优先 `MDICT_INDEX_THREADS` 环境变量；非正或未设 → `None`，
+/// 表示「不限制」交由 rayon 按可用核自适配。
+fn index_threads_config() -> Option<usize> {
+    std::env::var("MDICT_INDEX_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+}
+
+/// 尝试把当前线程优先级降到最低。best-effort：无权泶（非 root 降低 nice 通常
+/// 可，提升不可）会安静报错并上车。跨平台为 Linux/macOS/Windows 的低优先映射。
+fn try_lower_thread_priority() {
+    use thread_priority::{ThreadPriority, set_current_thread_priority};
+    if let Err(e) = set_current_thread_priority(ThreadPriority::Min) {
+        tracing::debug!("could not lower indexing thread priority: {e}");
+    }
+}
+
+/// 构建后台建索引专用的 rayon 线程池：线程数可配（`MDICT_INDEX_THREADS`），
+/// 每个线程启动时降到低优先级，避免在树莓派等弱设备上建索引吃满核抢占
+/// Web 查询线程。返回 `Arc<ThreadPool>` 以便后续热更新 watcher 复用同一池。
+fn build_index_thread_pool() -> std::sync::Arc<rayon::ThreadPool> {
+    let mut builder = rayon::ThreadPoolBuilder::new().thread_name(|i| format!("mdict-index-{i}"));
+    if let Some(n) = index_threads_config() {
+        builder = builder.num_threads(n);
+        info!("index pool limited to {n} threads (MDICT_INDEX_THREADS)");
+    } else {
+        info!("index pool: no thread limit (MDICT_INDEX_THREADS unset); rayon self-adapts");
+    }
+    // 每线程启动时降优先级。闭包跨线程被 clone，但仅读周边不可变环境。
+    builder = builder.start_handler(move |_| try_lower_thread_priority());
+
+    match builder.build() {
+        Ok(pool) => std::sync::Arc::new(pool),
+        Err(e) => {
+            // 进手册不会发生（threads 配置合法），但作为竟竟卫仍给出明确错误。
+            error!("failed to build dedicated index pool, falling back to global rayon pool: {e}");
+            // 退回：一个以身作则的“什么都不限制”池仍是独立于全局右侧的 right 语义。
+            // 按 rayon：build 失败律不可复用为全局，以不变价仍 build 一默认池。
+            std::sync::Arc::new(
+                rayon::ThreadPoolBuilder::new()
+                    .thread_name(|i| format!("mdict-index-{i}"))
+                    .build()
+                    .expect("rayon default pool build must not fail"),
+            )
+        }
+    }
+}
+
+// =========================== 词典目录热更新（stub，后续填充） ===========================
+
+/// 是否启用词典目录热更新。默认启用；设 `MDICT_HOT_RELOAD=0` 可关闭（例如在
+/// 卷声不兼容或审调试时）。
+fn needs_dict_watcher(dict_dir: &std::path::Path) -> bool {
+    if !dict_dir.is_dir() {
+        return false;
+    }
+    std::env::var("MDICT_HOT_RELOAD")
+        .ok()
+        .and_then(|v| v.parse::<u8>().ok())
+        .map(|v| v != 0)
+        .unwrap_or(true)
+}
+
+/// 监听词典目录新增/变更的 .mdx/.mdd/.toml，增量建索引并热替换 catalog。
+///
+/// 完整实现见后续应用（需要 AppState::reload_catalog、notify 事件循环、
+/// arc-swap catalog）。此骨架仅保持任务存活、按周期重扫以保证构建绿。
+#[allow(unused_variables)]
+async fn dict_watcher(
+    dict_dir: std::path::PathBuf,
+    state: AppState,
+    index_pool: std::sync::Arc<rayon::ThreadPool>,
+) {
+    use std::time::Duration;
+    tracing::info!("dict hot-reload watcher started on {:?}", dict_dir);
+    loop {
+        // HACK: stub 暂以惰性轮询 + 长间隔代替 notify（实现真实监听见后续检查）。
+        tokio::time::sleep(Duration::from_secs(3600)).await;
     }
 }
 

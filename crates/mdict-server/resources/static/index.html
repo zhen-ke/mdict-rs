@@ -6,10 +6,14 @@
     <meta name="description" content="MDX 极速词典 - Rust + SQLite 驱动，极致轻量高效"/>
     <meta name="theme-color" content="#0b0f19"/>
     <script src="jquery.min.js"></script>
-    <script src="lm6.js"></script>
     <script src="index.js"></script>
     <link rel="stylesheet" type="text/css" href="index.css"/>
-    <link rel="stylesheet" type="text/css" href="lm6.css"/>
+    <!--
+      词典专属样式/脚本（lm6.css/lm6.js 等）不再全局硬编码——它们只对特定
+      词典有意义，强制作用于所有词典会互相污染。改为随每本词典的条目一起，
+      在其独立 iframe 文档内按需引入（见 presenter::render_aggregate_html 与
+      index.js 的 iframe 沙箱逻辑）。
+    -->
     <title>MDict 极速词典</title>
 </head>
 <body>
@@ -55,7 +59,7 @@
 
         <div class="result-card">
             <button id="share-btn" class="share-btn" title="复制分享链接" style="display: none;"><svg class="icon"><use href="#icon-link"/></svg> 分享</button>
-            <div id="mdx-resp" class="lm6">
+            <div id="mdx-resp">
                 <div class="empty-state">
                     <div class="empty-state-icon"><svg class="icon"><use href="#icon-search"/></svg></div>
                     <p>请在上方输入单词开始查询</p>

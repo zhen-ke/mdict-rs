@@ -421,10 +421,28 @@ fn query_aggregate_entries(
                     // 成 `String` 再 sanitize 的二道拷贝。
                     let title = state.get_dict_display_name(file);
                     let container_class = state.get_dict_container_class(file);
+                    // 词典级自定义 CSS/JS（<dict>.toml 的 css/js 字段，支持内联或
+                    // @file 引用）——注入该词典的 iframe 沙箱文档。
+                    let cfg = state.get_dict_config(dict_id);
+                    let (extra_css, extra_js) = match &cfg {
+                        Some(c) => (
+                            {
+                                let s = c.get_css_content(state.dict_dir());
+                                (!s.trim().is_empty()).then_some(s)
+                            },
+                            {
+                                let s = c.get_js_content(state.dict_dir());
+                                (!s.trim().is_empty()).then_some(s)
+                            },
+                        ),
+                        None => (None, None),
+                    };
                     Some(AggregateSection {
                         dict_id: dict_id.clone(),
                         title,
                         container_class,
+                        extra_css,
+                        extra_js,
                         body: data,
                     })
                 }

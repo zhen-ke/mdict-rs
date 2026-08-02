@@ -33,6 +33,15 @@ pub struct DictConfig {
 
     /// Whether FTS should be built for this dictionary (default: true)
     pub fts: Option<bool>,
+
+    /// FTS5 分词器选择（默认 `unicode61`）。可选值：`unicode61` / `trigram`。
+    /// 白名单校验在 [`mdict_core::indexing::FtsTokenizer::from_name`]。
+    ///
+    /// 对中文等无空格分隔的 CJK 词典，`unicode61` 会把每个 CJK 字符拆成单个 token
+    /// （召回高但精度低）；选 `trigram`（SQLite 3.34+ 内建）按 3-字符滑动窗口切分，
+    /// 能支撑 CJK 子串与混合语料的全文检索召回，是当前离 jieba/ngram 最近的
+    /// 零依赖选项。Jieba等复杂分词另一条路（需 C tokenizer ABI），后续可叠。
+    pub fts_tokenizer: Option<String>,
 }
 
 impl DictConfig {
@@ -156,6 +165,15 @@ impl DictConfig {
 
     pub fn is_fts_enabled(&self) -> bool {
         self.fts.unwrap_or(true)
+    }
+
+    /// 该词典在 FTS5 建表时要用的分词器（默认 `unicode61`）。
+    /// 未配置或配置了无法识别的名称时回退默认。
+    pub fn fts_tokenizer(&self) -> mdict_core::indexing::FtsTokenizer {
+        self.fts_tokenizer
+            .as_deref()
+            .and_then(mdict_core::indexing::FtsTokenizer::from_name)
+            .unwrap_or_default()
     }
 }
 

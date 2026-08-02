@@ -11,8 +11,8 @@ use crate::app_state::AppState;
 use crate::config::DictInfo;
 use crate::lucky;
 use crate::query::{
-    DictFilter, QueryError, fuzzy_suggest, query, query_aggregate, query_specific_entry,
-    query_specific_resource, query_with_trace, suggest,
+    DictFilter, QueryError, detect_content_type, fuzzy_suggest, query, query_aggregate,
+    query_specific_entry, query_specific_resource, query_with_trace, suggest,
 };
 use mdict_core::css_scope::scope_css;
 use mdict_core::indexing::index_status;
@@ -483,6 +483,33 @@ async fn query_dict_resource(
         }
     }
 
+    // 词典文件夹资源：同名词典文件夹 + 词典根目录（`mdict/`）优先于 static
+    // fallback 加载（优先级：MDD 索引 > 同名子文件夹 > 词典根目录 > static
+    // 目录）。词典作者自带的 css/js/图片放这两个位置均可生效——同名子文件夹
+    // 归属单本词典，根目录平铺的文件对词典根目录下所有词典共享。
+    let mut folder_candidates: Vec<PathBuf> = Vec::new();
+    if let Some(folder) = state.get_dict_folder(&dict_id) {
+        folder_candidates.push(folder);
+    }
+    folder_candidates.push(state.dict_dir().to_path_buf());
+    for folder in folder_candidates {
+        if let Some(folder_file) = resolve_dict_folder_file(&folder, &path) {
+            if let Some(resp) = serve_dict_folder_resource(
+                &state,
+                &dict_id,
+                folder_file,
+                &path,
+                &cache_key,
+                &negative_key,
+                &headers,
+            )
+            .await
+            {
+                return resp;
+            }
+        }
+    }
+
     // Fallback: serve static assets for dictionary-rendered pages (e.g. lm6.css/lm6.js).
     if let Some(static_file) = resolve_static_file(state.static_dir(), &path, false).await {
         if should_cache_resource(&static_file.content_type, static_file.size) {
@@ -524,6 +551,88 @@ async fn query_dict_resource(
 
     state.put_negative_cache(negative_key);
     not_found()
+}
+
+/// 在词典文件夹内安全解析资源路径，返回可读取的文件路径。
+///
+/// 规则：
+/// - 拒绝含 `..` 的路径、绝对路径、空路径（防路径穿越）。
+/// - `\` 分隔符规范化为 `/`。
+/// - 最终候选文件 canonicalize 后必须仍位于词典文件夹内（防符号链接逃逸）。
+///
+/// 命中（文件存在）返回 `Some(PathBuf)`；否则返回 `None`。
+fn resolve_dict_folder_file(folder: &FsPath, request_path: &str) -> Option<PathBuf> {
+    let raw = request_path.trim().trim_start_matches(['/', '\\']);
+    if raw.is_empty() {
+        return None;
+    }
+    // 拒绝遍历与绝对路径
+    if raw.contains("..") || raw.starts_with(['/', '\\']) {
+        return None;
+    }
+    let rel = raw.replace('\\', "/");
+    let candidate = folder.join(&rel);
+
+    // 只接受存在的常规文件
+    if !candidate.is_file() {
+        return None;
+    }
+
+    // canonicalize 后校验仍位于词典文件夹内
+    let canonical_folder = folder.canonicalize().ok()?;
+    let canonical_candidate = candidate.canonicalize().ok()?;
+    if canonical_candidate.starts_with(&canonical_folder) {
+        Some(canonical_candidate)
+    } else {
+        tracing::warn!(
+            "Rejected dict folder resource escaping folder: {:?} not under {:?}",
+            canonical_candidate,
+            canonical_folder
+        );
+        None
+    }
+}
+
+/// 读取词典文件夹资源并返回响应（CSS 经词典作用域化后缓存）。返回 `None`
+/// 表示文件读取失败（调用方应继续尝试下一个候选目录）。
+async fn serve_dict_folder_resource(
+    state: &AppState,
+    dict_id: &str,
+    folder_file: PathBuf,
+    request_path: &str,
+    cache_key: &str,
+    negative_key: &str,
+    headers: &HeaderMap,
+) -> Option<Response> {
+    let content_type = detect_content_type(request_path);
+    match fs::read(&folder_file).await {
+        Ok(read) => {
+            // CSS 作用域化与缓存策略与 MDD 内资源一致。
+            let data = scope_dict_css_if_css(dict_id, Bytes::from(read), &content_type);
+            if should_cache_resource(&content_type, data.len()) {
+                state.put_resource_cached(
+                    cache_key.to_string(),
+                    data.clone(),
+                    content_type.clone(),
+                );
+            }
+            state.clear_negative_cache(negative_key);
+            Some(cacheable_binary_response(
+                data,
+                &content_type,
+                RESOURCE_CACHE_CONTROL,
+                Some(headers),
+            ))
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to read dict folder resource {:?}: {}",
+                folder_file,
+                e
+            );
+            None
+        }
+    }
 }
 
 /// Build the CSS scope selector for a dictionary section's body.

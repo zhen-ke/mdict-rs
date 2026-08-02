@@ -601,8 +601,9 @@ kbd {
 	display: inline-block;
 }
 
-#mdx-resp .mdict-dict-body {
-	padding: 20px 24px;
+/* Dictionary iframe sandbox container (per-dict isolated document) */
+#mdx-resp .mdict-dict-frame {
+	padding: 0;
 	max-height: 20000px;
 	overflow: hidden;
 	opacity: 1;
@@ -610,6 +611,21 @@ kbd {
 		max-height 0.35s ease,
 		opacity 0.2s ease,
 		padding 0.25s ease;
+}
+
+/* The sandbox iframe itself: each dictionary renders in its own isolated
+   document (styles + scripts scoped by the browser), so no cross-dict
+   pollution. Height is auto-sized by index.js (ResizeObserver/postMessage). */
+#mdx-resp .mdict-dict-iframe {
+	display: block;
+	width: 100%;
+	border: 0;
+	margin: 0;
+	padding: 0;
+	background: transparent;
+	min-height: 80px;
+	/* content inside the iframe documents provides its own padding; the
+	   outer frame keeps a little breathing room for the card look */
 }
 
 /* Toggle arrow */
@@ -627,7 +643,7 @@ kbd {
 }
 
 /* Collapsed state */
-#mdx-resp .mdict-dict-section.collapsed .mdict-dict-body {
+#mdx-resp .mdict-dict-section.collapsed .mdict-dict-frame {
 	max-height: 0;
 	opacity: 0;
 	padding-top: 0;
@@ -870,10 +886,6 @@ footer span {
 		position: absolute;
 		top: 12px;
 		right: 12px;
-	}
-
-	#mdx-resp .mdict-dict-body {
-		padding: 14px 16px;
 	}
 }
 
