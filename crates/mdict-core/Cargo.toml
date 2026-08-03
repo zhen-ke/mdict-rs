@@ -13,7 +13,7 @@ encoding = "0.2"
 adler32 = "1"
 bytes = "1"
 rusqlite = { version = "0.37", features = ["bundled"] }
-flate2 = { version = "1", features = ["zlib"], default-features = false }
+flate2 = { version = "1", features = ["zlib-rs"], default-features = false }
 minilzo-rs = "0.6"
 ripemd = "0.1"
 memmap2 = "0.9.9"

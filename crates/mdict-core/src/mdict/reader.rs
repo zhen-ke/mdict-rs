@@ -175,33 +175,43 @@ impl MdxReader {
             dsize: block_dsize,
         };
 
-        let block_decompressed = {
+        // 快路径：缓存命中只在锁内做一次引用计数，绝不持锁。
+        let block_decompressed = if let Some(cached) = {
+            let mut cache = self.block_cache.lock().expect("block cache mutex poisoned");
+            cache.get(&key)
+        } {
+            cached
+        } else {
+            // 慢路径：解压（可能是 LZO/zlib 大块）在锁外执行，避免
+            // 一个大块解压期间卡死同词典所有并发查询；解压完成后再
+            // 回锁内二次检查（double-checked locking）——期间可能有
+            // 其他线程已插入同 key，直接复用，避免重复解压。
+            let block_buf = &self.mmap[block_offset..block_end];
+            // 前置拒绝不支持的加密方法（enc_method == 2，即
+            // RegCode/商业加密）：与其让 LZO/zlib/Ripemd128 走一遭注定
+            // 失败的路径，不如直接给出可读错误。
+            if block_buf.len() >= 4 {
+                let enc = u32::from_le_bytes([
+                    block_buf[0],
+                    block_buf[1],
+                    block_buf[2],
+                    block_buf[3],
+                ]);
+                let enc_method = (enc >> 4) & 0xf;
+                if enc_method == 2 {
+                    return Err(MdictError::UnsupportedEncryption { method: 2 });
+                }
+            }
+            let (_, decompressed) = record_block_parser(block_csize, block_dsize)
+                .parse(block_buf)
+                .map_err(|e| {
+                    MdictError::CorruptInput(format!("record block parse error: {e:?}"))
+                })?;
+            let decompressed = Bytes::from(decompressed);
             let mut cache = self.block_cache.lock().expect("block cache mutex poisoned");
             if let Some(cached) = cache.get(&key) {
                 cached
             } else {
-                let block_buf = &self.mmap[block_offset..block_end];
-                // 前置拒绝不支持的加密方法（enc_method == 2，即
-                // RegCode/商业加密）：与其让 LZO/zlib/Ripemd128 走一遭注定
-                // 失败的路径，不如直接给出可读错误。
-                if block_buf.len() >= 4 {
-                    let enc = u32::from_le_bytes([
-                        block_buf[0],
-                        block_buf[1],
-                        block_buf[2],
-                        block_buf[3],
-                    ]);
-                    let enc_method = (enc >> 4) & 0xf;
-                    if enc_method == 2 {
-                        return Err(MdictError::UnsupportedEncryption { method: 2 });
-                    }
-                }
-                let (_, decompressed) = record_block_parser(block_csize, block_dsize)
-                    .parse(block_buf)
-                    .map_err(|e| {
-                        MdictError::CorruptInput(format!("record block parse error: {e:?}"))
-                    })?;
-                let decompressed = Bytes::from(decompressed);
                 cache.put(key, decompressed.clone());
                 decompressed
             }
