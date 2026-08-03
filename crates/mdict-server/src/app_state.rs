@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use axum::body::Bytes;
 use moka::sync::Cache;
 use r2d2::Pool;
@@ -135,7 +136,7 @@ struct CachedPayload {
     content_type: Arc<str>,
 }
 
-struct DictCatalog {
+pub(crate) struct DictCatalog {
     dict_text_files: Vec<PathBuf>,
     dict_resource_files: Vec<PathBuf>,
     dict_configs_by_path: HashMap<PathBuf, DictConfig>,
@@ -146,10 +147,16 @@ struct DictCatalog {
     /// dict_id → 同名词典文件夹路径（`mdict/<词典主文件名>/`），存放该词典
     /// 的 css/js/图片等外部资源；无同名文件夹的词典不在此表中。
     dict_folders_by_id: HashMap<String, PathBuf>,
+    /// dict_id → 词典自定义 CSS 内容（@file 引用已在建目录时解析）。
+    /// 仅存解析后非空的内容；随 catalog 重建失效（热更新无需额外失效）。
+    /// 避免每次聚合查询在 rayon 并行闭包里重复读盘 + canonicalize。
+    extra_css_by_id: HashMap<String, String>,
+    /// dict_id → 词典自定义 JS 内容（@file 引用已解析）。同 [`Self::extra_css_by_id`]。
+    extra_js_by_id: HashMap<String, String>,
 }
 
 impl DictCatalog {
-    fn from_dict_files(dict_files: &[PathBuf]) -> Self {
+    pub(crate) fn from_dict_files(dict_files: &[PathBuf], dict_dir: &Path) -> Self {
         let dict_text_files: Vec<PathBuf> = dict_files
             .iter()
             .filter(|p| AppState::is_mdx_file(p))
@@ -224,6 +231,21 @@ impl DictCatalog {
             }
         }
 
+        // 自定义 CSS/JS 内容启动时一次性解析（含 @file 读盘），查询热路径
+        // 只做 HashMap 查找。空内容不入表，`get_extra_css/js` 返回 None。
+        let mut extra_css_by_id = HashMap::new();
+        let mut extra_js_by_id = HashMap::new();
+        for (id, cfg) in &dict_configs_by_id {
+            let css = cfg.get_css_content(dict_dir);
+            if !css.trim().is_empty() {
+                extra_css_by_id.insert(id.clone(), css);
+            }
+            let js = cfg.get_js_content(dict_dir);
+            if !js.trim().is_empty() {
+                extra_js_by_id.insert(id.clone(), js);
+            }
+        }
+
         Self {
             dict_text_files,
             dict_resource_files,
@@ -233,7 +255,15 @@ impl DictCatalog {
             dict_id_map,
             path_to_id,
             dict_folders_by_id,
+            extra_css_by_id,
+            extra_js_by_id,
         }
+    }
+
+    /// 词典文件路径 → dict_id（用于热更新 diff 后在新 catalog 上补查
+    /// 新增词典的 id）。
+    pub(crate) fn id_of_path(&self, path: &Path) -> Option<&str> {
+        self.path_to_id.get(path).map(|s| s.as_str())
     }
 }
 
@@ -251,6 +281,10 @@ struct RuntimeState {
     /// 保留一条）。以路径为键、线程安全读写；`/api/index/status` 读取它把
     /// 失败原因暴露给前端，填补此前 fire-and-forget 的静默盲区。
     index_failures: RwLock<HashMap<PathBuf, IndexFailure>>,
+    /// 串行化「建索引 / 热更新重载」的互斥锁：启动重试循环与 dict watcher
+    /// 共用，避免同一词典被两个后台任务并发重建索引（remove_file + 写入
+    /// 交错会产出撕裂的 .db）。
+    reload_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl RuntimeState {
@@ -279,15 +313,31 @@ impl RuntimeState {
                 .time_to_live(NEGATIVE_CACHE_TTL)
                 .build(),
             index_failures: RwLock::new(HashMap::new()),
+            reload_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 }
 
-#[derive(Clone)]
+impl Clone for AppState {
+    fn clone(&self) -> Self {
+        Self {
+            dict_dir: self.dict_dir.clone(),
+            static_dir: self.static_dir.clone(),
+            catalog: self.catalog.clone(),
+            runtime: self.runtime.clone(),
+        }
+    }
+}
+
 pub struct AppState {
     dict_dir: Arc<PathBuf>,
     static_dir: Arc<PathBuf>,
-    catalog: Arc<DictCatalog>,
+    /// 词典目录编目。锁自由读（arc-swap）、整体换新：热更新 watcher 重建
+    /// 后 `store` 新 catalog，查询线程始终读到一致的快照。
+    ///
+    /// `Arc<ArcSwap<_>>` 保证所有 `AppState` 克隆共享同一个 swap 容器——
+    /// 否则 watcher 在自己克隆上 `store`，对 axum 按请求克隆出的实例不可见。
+    catalog: Arc<ArcSwap<DictCatalog>>,
     runtime: Arc<RuntimeState>,
 }
 
@@ -301,13 +351,13 @@ impl AppState {
                 .filter(|v| *v > 0)
                 .unwrap_or_else(runtime_max_concurrent_blocking_queries);
 
-        let catalog = DictCatalog::from_dict_files(&dict_files);
+        let catalog = DictCatalog::from_dict_files(&dict_files, &dict_dir);
         let runtime = RuntimeState::new(max_concurrent_blocking_queries);
 
         Self {
             dict_dir: Arc::new(dict_dir),
             static_dir: Arc::new(static_dir),
-            catalog: Arc::new(catalog),
+            catalog: Arc::new(ArcSwap::new(Arc::new(catalog))),
             runtime: Arc::new(runtime),
         }
     }
@@ -320,20 +370,92 @@ impl AppState {
         &self.static_dir
     }
 
-    pub fn dict_text_files(&self) -> &[PathBuf] {
-        &self.catalog.dict_text_files
+    pub fn dict_text_files(&self) -> Vec<PathBuf> {
+        self.catalog.load().dict_text_files.clone()
     }
 
-    pub fn dict_resource_files(&self) -> &[PathBuf] {
-        &self.catalog.dict_resource_files
+    pub fn dict_resource_files(&self) -> Vec<PathBuf> {
+        self.catalog.load().dict_resource_files.clone()
+    }
+
+    /// 当前 catalog 中的全部词典文件（文本 + 资源，去重排序）。
+    /// 供热更新 diff 用：旧 catalog 快照与新扫描结果做集合差。
+    pub(crate) fn all_dict_files(&self) -> Vec<PathBuf> {
+        let catalog = self.catalog.load();
+        let mut files: Vec<PathBuf> = catalog
+            .dict_text_files
+            .iter()
+            .chain(&catalog.dict_resource_files)
+            .cloned()
+            .collect();
+        files.sort();
+        files.dedup();
+        files
+    }
+
+    /// 原子整体换新词典编目（热更新用）。旧 catalog 的 Arc 被新快照取代，
+    /// 正在使用旧快照的查询不受影响。
+    pub(crate) fn reload_catalog(&self, new_catalog: DictCatalog) {
+        self.catalog.store(Arc::new(new_catalog));
+    }
+
+    /// 丢弃指定路径的连接池与 mmap reader，让下次访问按新文件懒重建。
+    /// 用于词典变更/删除后的运行时资源轮换；在途查询持有的 Arc 克隆
+    /// 不受影响（用完即关）。
+    pub(crate) fn drop_runtime_for(&self, paths: &HashSet<PathBuf>) {
+        {
+            let mut pools = self
+                .runtime
+                .db_pools
+                .write()
+                .expect("db_pools rwlock poisoned");
+            pools.retain(|p, _| !paths.contains(p));
+        }
+        {
+            let mut readers = self
+                .runtime
+                .mdx_readers
+                .write()
+                .expect("mdx_readers rwlock poisoned");
+            readers.retain(|p, _| !paths.contains(p));
+        }
+    }
+
+    /// 使缓存中与指定词典 id 相关的条目失效（entry/resource/negative 三层）。
+    /// 聚合条目（`entry:aggregate:*`）混入全部词典，任一词典变更都一并清空。
+    /// moka 的 `invalidate_entries_if` 要求 `'static` 谓词，id 集克隆进闭包。
+    pub(crate) fn invalidate_caches_for_dicts(&self, ids: &HashSet<String>) {
+        if ids.is_empty() {
+            return;
+        }
+        let entry_ids = ids.clone();
+        let _ = self
+            .runtime
+            .entry_cache
+            .invalidate_entries_if(move |k, _| cache_key_involves_dicts(k, &entry_ids));
+        let resource_ids = ids.clone();
+        let _ = self
+            .runtime
+            .resource_cache
+            .invalidate_entries_if(move |k, _| cache_key_involves_dicts(k, &resource_ids));
+        let negative_ids = ids.clone();
+        let _ = self
+            .runtime
+            .negative_cache
+            .invalidate_entries_if(move |k, _| cache_key_involves_dicts(k, &negative_ids));
+    }
+
+    /// 建索引/重载互斥锁（见 [`RuntimeState::reload_lock`]）。
+    pub(crate) fn reload_lock(&self) -> &Arc<tokio::sync::Mutex<()>> {
+        &self.runtime.reload_lock
     }
 
     pub fn get_dict_id(&self, path: &Path) -> Option<String> {
-        self.catalog.path_to_id.get(path).cloned()
+        self.catalog.load().path_to_id.get(path).cloned()
     }
 
-    pub fn get_dict_files(&self, id: &str) -> Option<&Vec<PathBuf>> {
-        self.catalog.dict_id_map.get(id)
+    pub fn get_dict_files(&self, id: &str) -> Option<Vec<PathBuf>> {
+        self.catalog.load().dict_id_map.get(id).cloned()
     }
 
     pub fn get_dict_text_files_by_id(&self, id: &str) -> Vec<PathBuf> {
@@ -361,9 +483,9 @@ impl AppState {
             if !seen.insert(file.clone()) {
                 continue;
             }
-            if Self::is_mdd_file(file) {
+            if Self::is_mdd_file(&file) {
                 mdd.push(file.clone());
-            } else if Self::is_mdx_file(file) {
+            } else if Self::is_mdx_file(&file) {
                 mdx.push(file.clone());
             }
         }
@@ -373,24 +495,25 @@ impl AppState {
     }
 
     pub fn get_dict_config(&self, dict_id: &str) -> Option<DictConfig> {
-        if let Some(cfg) = self.catalog.dict_configs_by_id.get(dict_id) {
+        let catalog = self.catalog.load();
+        if let Some(cfg) = catalog.dict_configs_by_id.get(dict_id) {
             return Some(cfg.clone());
         }
 
         let path = PathBuf::from(dict_id);
-        self.catalog.dict_configs_by_path.get(&path).cloned()
+        catalog.dict_configs_by_path.get(&path).cloned()
     }
 
     pub fn get_all_dict_info(&self) -> Vec<DictInfo> {
-        let mut ids: Vec<&String> = self.catalog.id_to_primary_text.keys().collect();
+        let catalog = self.catalog.load();
+        let mut ids: Vec<&String> = catalog.id_to_primary_text.keys().collect();
         ids.sort();
 
         ids.into_iter()
             .filter_map(|id| {
-                let file = self.catalog.id_to_primary_text.get(id)?;
+                let file = catalog.id_to_primary_text.get(id)?;
                 let default_config = DictConfig::default();
-                let cfg = self
-                    .catalog
+                let cfg = catalog
                     .dict_configs_by_path
                     .get(file)
                     .unwrap_or(&default_config);
@@ -410,6 +533,7 @@ impl AppState {
     pub fn get_dict_display_name(&self, dict_path: &Path) -> String {
         let default_config = DictConfig::default();
         self.catalog
+            .load()
             .dict_configs_by_path
             .get(dict_path)
             .unwrap_or(&default_config)
@@ -418,6 +542,7 @@ impl AppState {
 
     pub fn get_dict_container_class(&self, dict_path: &Path) -> Option<String> {
         self.catalog
+            .load()
             .dict_configs_by_path
             .get(dict_path)
             .and_then(|cfg| cfg.container_class.clone())
@@ -426,7 +551,19 @@ impl AppState {
     /// 返回词典的同名文件夹路径（`mdict/<词典主文件名>/`），用于加载词典
     /// 作者自带的 css/js/图片等外部资源。无同名文件夹时返回 `None`。
     pub fn get_dict_folder(&self, dict_id: &str) -> Option<PathBuf> {
-        self.catalog.dict_folders_by_id.get(dict_id).cloned()
+        self.catalog.load().dict_folders_by_id.get(dict_id).cloned()
+    }
+
+    /// 词典自定义 CSS 内容（@file 已解析），供聚合页 iframe 注入。
+    /// 空内容返回 `None`（无自定义 CSS 时跳过注入）。
+    pub fn get_extra_css(&self, dict_id: &str) -> Option<String> {
+        self.catalog.load().extra_css_by_id.get(dict_id).cloned()
+    }
+
+    /// 词典自定义 JS 内容（@file 已解析），供聚合页 iframe 注入。
+    /// 空内容返回 `None`（无自定义 JS 时跳过注入）。
+    pub fn get_extra_js(&self, dict_id: &str) -> Option<String> {
+        self.catalog.load().extra_js_by_id.get(dict_id).cloned()
     }
 
     fn db_path(dict_file: &Path) -> PathBuf {
@@ -512,7 +649,7 @@ impl AppState {
         // P4: 按“当前词典总数”自适应 per-reader BlockCache 预算——词典多时
         // 均摊 `BLOCK_CACHE_TOTAL_BUDGET_BYTES`、词典少时保持原 64 MiB。
         // 字典在启动时一次扫描，后续不变，故以 dict_id_map 的词表状况为准。
-        let budget = per_reader_cache_budget(self.catalog.dict_id_map.len().max(1));
+        let budget = per_reader_cache_budget(self.catalog.load().dict_id_map.len().max(1));
         let reader = Arc::new(MdxReader::with_budget(&dict_file, budget)?);
         let entry = {
             let mut guard = self
@@ -647,10 +784,30 @@ impl AppState {
     }
 }
 
+/// 判定缓存 key 是否受「ids 集合对应词典变更」影响（热更新缓存失效用）。
+///
+/// - `entry:dict:{id}:{word}` / `resource:dict:{id}:{path}`：按 id 前缀匹配。
+/// - `entry:aggregate:{word}[:{ids}]`：聚合结果混入全部词典（含无 filter 的
+///   全量聚合），任一词典变更都需失效——保守全清。
+/// - `negative:{...}`：递归剥掉前缀后再判。
+fn cache_key_involves_dicts(key: &str, ids: &HashSet<String>) -> bool {
+    let key = key.strip_prefix("negative:").unwrap_or(key);
+    if let Some(rest) = key.strip_prefix("entry:dict:") {
+        return rest.split(':').next().is_some_and(|id| ids.contains(id));
+    }
+    if let Some(rest) = key.strip_prefix("resource:dict:") {
+        return rest.split(':').next().is_some_and(|id| ids.contains(id));
+    }
+    if key.starts_with("entry:aggregate:") {
+        return true;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
-    use super::AppState;
-    use std::collections::HashMap;
+    use super::{AppState, cache_key_involves_dicts};
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn dict_id_allocation_is_stable_for_same_key() {
@@ -670,5 +827,35 @@ mod tests {
 
         assert_ne!(resolved, base);
         assert!(resolved.starts_with(&(base + "-")));
+    }
+
+    fn ids(one: &str) -> HashSet<String> {
+        [one.to_string()].into_iter().collect()
+    }
+
+    #[test]
+    fn cache_key_matches_dict_scoped_keys() {
+        let affected = ids("abc123");
+        assert!(cache_key_involves_dicts("entry:dict:abc123:hello", &affected));
+        assert!(cache_key_involves_dicts("resource:dict:abc123:/img/a.png", &affected));
+        assert!(cache_key_involves_dicts("negative:entry:dict:abc123:hello", &affected));
+    }
+
+    #[test]
+    fn cache_key_ignores_unrelated_dicts_and_other_keys() {
+        let affected = ids("abc123");
+        assert!(!cache_key_involves_dicts("entry:dict:other:hello", &affected));
+        assert!(!cache_key_involves_dicts("resource:dict:other:/x.png", &affected));
+        assert!(!cache_key_involves_dicts("resource:global:/static/app.js", &affected));
+    }
+
+    #[test]
+    fn cache_key_evicts_all_aggregate_entries() {
+        let affected = ids("abc123");
+        assert!(cache_key_involves_dicts("entry:aggregate:hello", &affected));
+        assert!(cache_key_involves_dicts(
+            "entry:aggregate:hello:abc123,other",
+            &affected
+        ));
     }
 }

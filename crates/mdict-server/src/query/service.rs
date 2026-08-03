@@ -121,7 +121,8 @@ pub fn suggest(
     let query_limit = limit * 20;
 
     // Parallelize suggest queries across dictionaries using Rayon.
-    let dict_files = filter_dict_files(state.dict_text_files(), state, filter);
+    let files = state.dict_text_files();
+    let dict_files = filter_dict_files(&files, state, filter);
     let per_dict_scores: Vec<HashMap<String, i32>> = dict_files
         .par_iter()
         .map(|file| {
@@ -253,9 +254,9 @@ pub fn fuzzy_suggest(
         return Ok(vec![]);
     }
 
-    let dict_files = filter_dict_files(state.dict_text_files(), state, filter);
+    let files = state.dict_text_files();
     // 每个词典独立返回 (词, 最小距离)。
-    let per_dict: Vec<Vec<(String, usize)>> = dict_files
+    let per_dict: Vec<Vec<(String, usize)>> = filter_dict_files(&files, state, filter)
         .par_iter()
         .map(|file| {
             let conn = match state.get_db_connection(file) {
@@ -324,7 +325,7 @@ fn query_internal(
             // 规范化键一次性精确匹配：命中大小写/变音/标点/空白变体即短路候选展开。
             let canonical = canonical_normalize(&w);
             if !canonical.is_empty() {
-                match lookup_entry_candidate_normalized(state, file, &canonical)? {
+                match lookup_entry_candidate_normalized(state, &file, &canonical)? {
                     EntryCandidateLookup::Miss => {}
                     EntryCandidateLookup::Redirect(linked_word) => {
                         info!(
@@ -334,7 +335,7 @@ fn query_internal(
                         return query_internal(state, linked_word, depth + 1);
                     }
                     EntryCandidateLookup::Hit(data) => {
-                        let html = if let Some(dict_id) = state.get_dict_id(file) {
+                        let html = if let Some(dict_id) = state.get_dict_id(&file) {
                             rewrite_entry_html_record(data, &dict_id)
                         } else {
                             data
@@ -347,14 +348,14 @@ fn query_internal(
         for candidate in &candidates {
             if is_resource_key(candidate) {
                 let Some(data) =
-                    lookup_record_in_file(state, file, candidate, Some(MAX_RESOURCE_RECORD_BYTES))?
+                    lookup_record_in_file(state, &file, candidate, Some(MAX_RESOURCE_RECORD_BYTES))?
                 else {
                     continue;
                 };
                 return Ok((data, detect_content_type(candidate)));
             }
 
-            match lookup_entry_candidate(state, file, candidate)? {
+            match lookup_entry_candidate(state, &file, candidate)? {
                 EntryCandidateLookup::Miss => continue,
                 EntryCandidateLookup::Redirect(linked_word) => {
                     info!(
@@ -364,7 +365,7 @@ fn query_internal(
                     return query_internal(state, linked_word, depth + 1);
                 }
                 EntryCandidateLookup::Hit(data) => {
-                    let html = if let Some(dict_id) = state.get_dict_id(file) {
+                    let html = if let Some(dict_id) = state.get_dict_id(&file) {
                         rewrite_entry_html_record(data, &dict_id)
                     } else {
                         data
@@ -381,7 +382,7 @@ fn get_link_target(state: &AppState, word: &str) -> Option<String> {
     let candidates = entry_query_candidates(word);
     for file in state.dict_text_files() {
         for candidate in &candidates {
-            let Ok(lookup) = lookup_entry_candidate(state, file, candidate) else {
+            let Ok(lookup) = lookup_entry_candidate(state, &file, candidate) else {
                 continue;
             };
             if let EntryCandidateLookup::Redirect(linked_word) = lookup {
@@ -402,7 +403,8 @@ fn query_aggregate_entries(
     // SQLite connection and mmap reader, follows @@@LINK redirects within
     // the same file, and produces a single HTML body. rayon preserves input
     // order, so the rendered sections stay in scan order.
-    let tasks: Vec<(&PathBuf, String)> = filter_dict_files(state.dict_text_files(), state, filter)
+    let files = state.dict_text_files();
+    let tasks: Vec<(&PathBuf, String)> = filter_dict_files(&files, state, filter)
         .into_iter()
         .filter_map(|file| state.get_dict_id(file).map(|id| (file, id)))
         .collect();
@@ -422,21 +424,11 @@ fn query_aggregate_entries(
                     let title = state.get_dict_display_name(file);
                     let container_class = state.get_dict_container_class(file);
                     // 词典级自定义 CSS/JS（<dict>.toml 的 css/js 字段，支持内联或
-                    // @file 引用）——注入该词典的 iframe 沙箱文档。
-                    let cfg = state.get_dict_config(dict_id);
-                    let (extra_css, extra_js) = match &cfg {
-                        Some(c) => (
-                            {
-                                let s = c.get_css_content(state.dict_dir());
-                                (!s.trim().is_empty()).then_some(s)
-                            },
-                            {
-                                let s = c.get_js_content(state.dict_dir());
-                                (!s.trim().is_empty()).then_some(s)
-                            },
-                        ),
-                        None => (None, None),
-                    };
+                    // @file 引用）——注入该词典的 iframe 沙箱文档。内容在
+                    // AppState 建 catalog 时已一次性解析（@file 读盘不落在
+                    // 查询热路径上，见 `get_extra_css/js`）。
+                    let extra_css = state.get_extra_css(dict_id);
+                    let extra_js = state.get_extra_js(dict_id);
                     Some(AggregateSection {
                         dict_id: dict_id.clone(),
                         title,

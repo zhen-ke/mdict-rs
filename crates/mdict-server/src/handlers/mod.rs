@@ -886,7 +886,7 @@ pub(crate) async fn handle_index_status(
 ) -> Json<Vec<DictIndexStatus>> {
     let mut items = Vec::new();
     for file in state.dict_text_files() {
-        let status = match index_status(file) {
+        let status = match index_status(&file) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("failed to read index status for {:?}: {}", file, e);
@@ -894,7 +894,7 @@ pub(crate) async fn handle_index_status(
             }
         };
         let id = state
-            .get_dict_id(file)
+            .get_dict_id(&file)
             .unwrap_or_else(|| file.to_string_lossy().to_string());
         let fts_enabled = state
             .get_dict_config(&id)
@@ -902,12 +902,12 @@ pub(crate) async fn handle_index_status(
             .unwrap_or(true);
 
         let (last_error, index_attempts) = state
-            .get_index_failure(file)
+            .get_index_failure(&file)
             .map(|f| (Some(f.error), f.attempts))
             .unwrap_or((None, 0));
         items.push(DictIndexStatus {
             id,
-            name: state.get_dict_display_name(file),
+            name: state.get_dict_display_name(&file),
             file: file.to_string_lossy().to_string(),
             db_exists: status.db_exists,
             up_to_date: status.up_to_date,

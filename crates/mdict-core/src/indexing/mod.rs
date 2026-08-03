@@ -413,7 +413,12 @@ fn flush_fts_chunk(tx: &Transaction, chunk: &mut Vec<String>) -> anyhow::Result<
     Ok(())
 }
 
-fn index_up_to_date(file: &Path, db_file: &Path) -> anyhow::Result<bool> {
+/// 判断既有索引（`<file>.db`）是否已是最新：schema 版本、源文件大小与
+/// mtime 均匹配才视为 up-to-date。
+///
+/// 公开给 server 侧热更新 watcher 做变更检测：db 缺失、schema 过期或源
+/// 文件被改过都返回 `false`（需要重建），与 `ensure_index` 的判定一致。
+pub fn index_up_to_date(file: &Path, db_file: &Path) -> anyhow::Result<bool> {
     let conn = Connection::open(db_file)?;
 
     if !has_table(&conn, "MDX_INDEX")? {

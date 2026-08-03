@@ -1,18 +1,20 @@
-use crate::app_state::AppState;
+use crate::app_state::{AppState, DictCatalog};
 use crate::config::{DictConfig, get_dict_dir, scan_dict_files, static_path};
 use crate::handlers::{
     handle_dict_audio, handle_dict_entry, handle_dict_list, handle_dict_res, handle_dict_resource,
     handle_dict_script, handle_dict_style, handle_index_status, handle_lucky, handle_query,
     handle_resource, handle_suggest, handle_suggest_fuzzy, handle_trace,
 };
-use mdict_core::indexing::{IndexJob, db_path, indexing};
+use mdict_core::indexing::{IndexJob, db_path, index_up_to_date, indexing};
 
 use axum::{
     Router,
     routing::{get, post},
 };
+use std::collections::HashSet;
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
@@ -48,22 +50,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let jobs: Vec<IndexJob> = if dict_files.is_empty() {
         Vec::new()
     } else {
-        dict_files
-            .iter()
-            .map(|file| {
-                let is_text_dict = !file
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("mdd"));
-                let fts_enabled = is_text_dict
-                    && DictConfig::load(file)
-                        .map(|cfg| cfg.is_fts_enabled())
-                        .unwrap_or(true);
-                let fts_tokenizer = DictConfig::load(file)
-                    .map(|cfg| cfg.fts_tokenizer())
-                    .unwrap_or(mdict_core::indexing::FtsTokenizer::Unicode61);
-                IndexJob::new(file.clone(), fts_enabled, fts_tokenizer)
-            })
-            .collect()
+        build_index_jobs(&dict_files)
     };
     if !jobs.is_empty() {
         info!(
@@ -156,6 +143,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// 为词典文件列表构建索引任务：FTS 开关与分词器取自同名 .toml 配置。
+/// 启动全量索引与热更新增量索引共用，保证两处判定一致。
+fn build_index_jobs(dict_files: &[PathBuf]) -> Vec<IndexJob> {
+    dict_files
+        .iter()
+        .map(|file| {
+            let is_text_dict = !file
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("mdd"));
+            let cfg = DictConfig::load(file);
+            let fts_enabled =
+                is_text_dict && cfg.as_ref().map(|c| c.is_fts_enabled()).unwrap_or(true);
+            let fts_tokenizer = cfg.as_ref().map(|c| c.fts_tokenizer()).unwrap_or_default();
+            IndexJob::new(file.clone(), fts_enabled, fts_tokenizer)
+        })
+        .collect()
+}
+
 /// 后台索引重试循环。初始一次性尝试，失败则按 5s / 20s / 60s 退避重试两轮，
 /// 依然失败则把最后一次错误写入 [`AppState::record_index_failure`]，供
 /// `/api/index/status` 暴露。退避用 `tokio::time::sleep` 而非阻塞 `thread::sleep`，
@@ -163,13 +168,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 ///
 /// 重试采用「按文件重试」策略：每一轮只重试上一轮仍失败的子集，避免对已
 /// 成功的词典重复建索引。`indexing()` 本身用 rayon 并行按文件调度。
+/// 每轮尝试持有 `reload_lock`，与热更新 watcher 互斥，避免同一词典被
+/// 并发重建索引。
 async fn indexing_with_retry(
     jobs: Vec<IndexJob>,
     state: AppState,
     index_pool: std::sync::Arc<rayon::ThreadPool>,
 ) {
-    use std::time::Duration;
-
     const MAX_ATTEMPTS: u32 = 3;
     const BACKOFFS: [Duration; 2] = [Duration::from_secs(5), Duration::from_secs(20)];
 
@@ -186,17 +191,19 @@ async fn indexing_with_retry(
         );
         // 复用 indexing 的 rayon 并行按件调度；join panic 也化为同一条 ETL。
         // 走专用 `index_pool`（低优先级、线程数受限），而非 rayon 全局池。
-        let pool_ref = index_pool.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            indexing(&snapshot, false, Some(&pool_ref))
-        })
-        .await
-        .map_err(|join| {
-            vec![(
-                PathBuf::new(),
-                anyhow::anyhow!("indexing task join error: {join}"),
-            )]
-        });
+        let result = {
+            // 与热更新 watcher 串行化：索引文件期间不许并发重载同一词典。
+            let _reload_guard = state.reload_lock().lock().await;
+            let pool_ref = index_pool.clone();
+            tokio::task::spawn_blocking(move || indexing(&snapshot, false, Some(&pool_ref)))
+                .await
+                .map_err(|join| {
+                    vec![(
+                        PathBuf::new(),
+                        anyhow::anyhow!("indexing task join error: {join}"),
+                    )]
+                })
+        };
 
         match result {
             Ok(Ok(())) => {
@@ -303,11 +310,11 @@ fn build_index_thread_pool() -> std::sync::Arc<rayon::ThreadPool> {
     }
 }
 
-// =========================== 词典目录热更新（stub，后续填充） ===========================
+// =========================== 词典目录热更新 ===========================
 
 /// 是否启用词典目录热更新。默认启用；设 `MDICT_HOT_RELOAD=0` 可关闭（例如在
 /// 卷声不兼容或审调试时）。
-fn needs_dict_watcher(dict_dir: &std::path::Path) -> bool {
+fn needs_dict_watcher(dict_dir: &Path) -> bool {
     if !dict_dir.is_dir() {
         return false;
     }
@@ -318,22 +325,247 @@ fn needs_dict_watcher(dict_dir: &std::path::Path) -> bool {
         .unwrap_or(true)
 }
 
-/// 监听词典目录新增/变更的 .mdx/.mdd/.toml，增量建索引并热替换 catalog。
+/// 是否关心该扩展名的变更事件。只放行词典源文件与配置文件；
+/// 索引产物 `.db` 必须过滤，否则「重载 → 建索引 → .db 事件 → 重载」
+/// 会形成死循环。
+fn is_relevant_extension(path: &Path) -> bool {
+    path.extension().is_some_and(|e| {
+        let e = e.to_string_lossy().to_ascii_lowercase();
+        e == "mdx" || e == "mdd" || e == "toml"
+    })
+}
+
+/// notify 事件是否值得触发一次重载。
+fn watcher_event_relevant(event: &notify::Event) -> bool {
+    event.paths.iter().any(|p| is_relevant_extension(p))
+}
+
+/// 事件驱动 + 周期兜底扫描的词典目录热更新循环。
 ///
-/// 完整实现见后续应用（需要 AppState::reload_catalog、notify 事件循环、
-/// arc-swap catalog）。此骨架仅保持任务存活、按周期重扫以保证构建绿。
-#[allow(unused_variables)]
+/// - notify 递归监听，相关事件（.mdx/.mdd/.toml）去抖 `RELOAD_DEBOUNCE`
+///   后执行一次全量重载（见 [`reload_dicts`]）。
+/// - 每 `RELOAD_FULL_SCAN_INTERVAL` 周期全量重载兜底：覆盖 notify 漏事件
+///   （inotify 上限、网络卷等）与启动前的存量变化；无变化时重载是纯
+///   no-op（`index_up_to_date` 短路，不重建索引）。
+const RELOAD_DEBOUNCE: Duration = Duration::from_millis(800);
+const RELOAD_FULL_SCAN_INTERVAL: Duration = Duration::from_secs(60);
+
 async fn dict_watcher(
-    dict_dir: std::path::PathBuf,
+    dict_dir: PathBuf,
     state: AppState,
     index_pool: std::sync::Arc<rayon::ThreadPool>,
 ) {
-    use std::time::Duration;
-    tracing::info!("dict hot-reload watcher started on {:?}", dict_dir);
-    loop {
-        // HACK: stub 暂以惰性轮询 + 长间隔代替 notify（实现真实监听见后续检查）。
-        tokio::time::sleep(Duration::from_secs(3600)).await;
+    use notify::{RecursiveMode, Watcher};
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<notify::Event>();
+    let mut watcher = match notify::recommended_watcher(move |res| {
+        if let Ok(event) = res {
+            let _ = tx.send(event);
+        }
+    }) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            error!("failed to start dict file watcher, falling back to periodic scan only: {e}");
+            None
+        }
+    };
+    if let Some(w) = watcher.as_mut() {
+        match w.watch(&dict_dir, RecursiveMode::Recursive) {
+            Ok(()) => info!("dict hot-reload watcher started on {:?}", dict_dir),
+            Err(e) => {
+                // watch 失败时 watcher 对象本身不注册任何监听，无害；周期
+                // 扫描兜底仍生效。
+                error!(
+                    "failed to watch dict dir {:?}, falling back to periodic scan only: {e}",
+                    dict_dir
+                );
+            }
+        }
     }
+
+    let mut last_full_scan = Instant::now();
+    loop {
+        // 周期兜底扫描到期 → 直接全量重载（无变化时快速 no-op）。
+        if last_full_scan.elapsed() >= RELOAD_FULL_SCAN_INTERVAL {
+            reload_dicts(&state, &index_pool, &dict_dir, &HashSet::new()).await;
+            last_full_scan = Instant::now();
+            continue;
+        }
+
+        // 等待下一个相关事件（或周期到期返回重扫）。
+        let until_full = RELOAD_FULL_SCAN_INTERVAL.saturating_sub(last_full_scan.elapsed());
+        let event = match tokio::time::timeout(until_full, rx.recv()).await {
+            Ok(Some(ev)) => ev,
+            _ => continue,
+        };
+        if !watcher_event_relevant(&event) {
+            continue;
+        }
+
+        // 去抖：吞掉随后 DEBOUNCE 窗口内的相关事件，避免编辑器写文件
+        // （多次 Modify + Create）触发连环重载；窗口内路径并入 affected。
+        let mut affected: HashSet<PathBuf> = event
+            .paths
+            .iter()
+            .filter(|p| is_relevant_extension(p))
+            .cloned()
+            .collect();
+        loop {
+            match tokio::time::timeout(RELOAD_DEBOUNCE, rx.recv()).await {
+                Ok(Some(ev)) if watcher_event_relevant(&ev) => {
+                    for p in ev.paths {
+                        if is_relevant_extension(&p) {
+                            affected.insert(p);
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+        info!(
+            "dict dir changed ({} relevant path(s)), reloading",
+            affected.len()
+        );
+        reload_dicts(&state, &index_pool, &dict_dir, &affected).await;
+        last_full_scan = Instant::now();
+    }
+}
+
+/// 执行一次全量重载（热更新核心，见 [`dict_watcher`]）：
+///
+/// 1. 重扫词典目录并构建新 catalog（含 .toml 配置与 CSS/JS 内容）。
+/// 2. 与旧 catalog 差集 + `index_up_to_date` 判定变更集（新增/删除/源文件变化）。
+/// 3. 先轮换变更/删除词典的运行时资源（连接池、mmap reader）再重建索引：
+///    旧池在 Windows 上会占住 .db 文件导致删不掉，且旧 mmap 映射的是旧
+///    内容 inode，重建后必须让新请求开新 reader。
+/// 4. 在专用低优索引池上增量重建变更词典的索引；失败记入 `/api/index/status`
+///    （下一轮周期扫描会按 mtime 差异自动重试）。
+/// 5. 清理被删除词典的残留 .db。
+/// 6. 失效受影响词典的缓存（entry/resource/negative 三层；聚合条目全清）。
+/// 7. 原子换新 catalog（arc-swap），此后新请求看到新词典表。
+///
+/// 全程持有 `AppState::reload_lock`，与启动重试循环互斥。
+/// `affected_events` 为去抖窗口内的 notify 事件路径（含 .toml）：仅配置变更
+/// 时源文件未动、无需重建索引，但聚合 HTML 里嵌了 CSS/JS，必须失效缓存。
+async fn reload_dicts(
+    state: &AppState,
+    index_pool: &std::sync::Arc<rayon::ThreadPool>,
+    dict_dir: &Path,
+    affected_events: &HashSet<PathBuf>,
+) {
+    let _reload_guard = state.reload_lock().lock().await;
+
+    let new_files = scan_dict_files(dict_dir);
+    let new_catalog = DictCatalog::from_dict_files(&new_files, dict_dir);
+
+    let old_files: HashSet<PathBuf> = state.all_dict_files().into_iter().collect();
+    let new_set: HashSet<PathBuf> = new_files.iter().cloned().collect();
+
+    // 变更集：新增 / 删除 / 索引已过期（源文件 mtime 或 size 变化）。
+    let mut changed: HashSet<PathBuf> = HashSet::new();
+    let mut removed: HashSet<PathBuf> = HashSet::new();
+    for f in old_files.iter().chain(new_files.iter()) {
+        if !new_set.contains(f) {
+            removed.insert(f.clone());
+        } else if !old_files.contains(f) || !index_up_to_date(f, &db_path(f)).unwrap_or(false) {
+            changed.insert(f.clone());
+        }
+    }
+
+    let mut rotated: HashSet<PathBuf> = changed.clone();
+    rotated.extend(removed.iter().cloned());
+
+    // 先轮换运行时资源（在途查询持有的 Arc 克隆不受影响），再重建索引。
+    state.drop_runtime_for(&rotated);
+
+    // 增量重建变更词典的索引（仅变更子集；新增词典同样在此首建）。
+    if !changed.is_empty() {
+        let changed_files: Vec<PathBuf> = changed.iter().cloned().collect();
+        let jobs = build_index_jobs(&changed_files);
+        let pool_ref = index_pool.clone();
+        let jobs_for_task = jobs.clone();
+        let result =
+            tokio::task::spawn_blocking(move || indexing(&jobs_for_task, false, Some(&pool_ref)))
+                .await
+                .map_err(|join| {
+                    vec![(
+                        PathBuf::new(),
+                        anyhow::anyhow!("indexing task join error: {join}"),
+                    )]
+                });
+        match result {
+            Ok(Ok(())) => {
+                for job in &jobs {
+                    state.clear_index_failure(&job.path);
+                }
+            }
+            Ok(Err(failures)) | Err(failures) => {
+                for (path, err) in &failures {
+                    if path.as_os_str().is_empty() {
+                        error!("hot-reload indexing join error: {}", err);
+                        continue;
+                    }
+                    warn!("hot-reload indexing failed for {:?}: {}", path, err);
+                    state.record_index_failure(path.clone(), err.to_string(), 1);
+                }
+            }
+        }
+    }
+
+    // 清理被删除词典的残留索引。
+    for f in &removed {
+        state.clear_index_failure(f);
+        let db = db_path(f);
+        if db.exists() {
+            info!("removing stale index for removed dict {:?}", db);
+            if let Err(e) = std::fs::remove_file(&db) {
+                warn!("failed to remove stale index {:?}: {}", db, e);
+            }
+        }
+    }
+
+    // 缓存失效：变更/删除词典的 id（旧 catalog）+ 新增词典的 id（新 catalog）
+    // + notify 事件中 .toml 对应的词典（仅配置变更，源文件未动）。
+    let mut affected_ids: HashSet<String> = HashSet::new();
+    for f in &rotated {
+        if let Some(id) = state.get_dict_id(f) {
+            affected_ids.insert(id);
+        }
+    }
+    for f in &changed {
+        if let Some(id) = new_catalog.id_of_path(f) {
+            affected_ids.insert(id.to_string());
+        }
+    }
+    for p in affected_events {
+        if !is_relevant_extension(p) {
+            continue;
+        }
+        let Some(stem) = p.file_stem().map(|s| s.to_string_lossy().to_lowercase()) else {
+            continue;
+        };
+        for f in &new_files {
+            if f.file_stem()
+                .map(|s| s.to_string_lossy().to_lowercase())
+                .is_some_and(|s| s == stem)
+            {
+                if let Some(id) = new_catalog.id_of_path(f) {
+                    affected_ids.insert(id.to_string());
+                }
+                break;
+            }
+        }
+    }
+    state.invalidate_caches_for_dicts(&affected_ids);
+
+    // 原子换新编目：此后新请求看到新词典表。
+    state.reload_catalog(new_catalog);
+    info!(
+        "dict catalog reloaded: {} text dict(s), {} changed, {} removed",
+        state.dict_text_files().len(),
+        changed.len(),
+        removed.len()
+    );
 }
 
 /// 监听 Ctrl-C 与（Unix）SIGTERM，任一到达即触发优雅停机。
