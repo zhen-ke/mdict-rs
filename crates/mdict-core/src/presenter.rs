@@ -184,8 +184,52 @@ fn render_dict_iframe_srcdoc(
       try {{ parent.postMessage({{ mdictNav: true, dictId: "{}", href: href }}, "*"); }} catch (err) {{}}
     }}
   }});
-}})();
+  // 父页面指令：entry 锚点滚动 / 义项索引滚动（父页无法直接操作沙箱 DOM）。
+  window.addEventListener('message', function (e) {{
+    var msg = e.data;
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.mdictScroll === true && msg.dictId === "{}") {{
+      var el = null;
+      if (typeof msg.target === 'string' && msg.target) {{
+        el = document.getElementById(msg.target);
+        // 兼容 `name` 锚点（LDOCE 等词典用 `<a name="...">` 而非 id）
+        if (!el) {{
+          var t = msg.target.replace(/["\\\\]/g, '');
+          try {{ el = document.querySelector('a[name="' + t + '"]'); }} catch (e) {{}}
+        }}
+      }} else if (typeof msg.index === 'number') {{
+        var nodes = document.querySelectorAll('.sense');
+        if (nodes.length === 0) nodes = document.querySelectorAll('.sensenum');
+        if (nodes.length === 0) nodes = document.querySelectorAll('.def');
+        el = nodes[msg.index] || null;
+      }}
+      if (el) {{
+        el.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+        var cls = 'mdict-scroll-flash';
+        el.classList.remove(cls);
+        void el.offsetWidth;
+        el.classList.add(cls);
+        setTimeout(function () {{ el.classList.remove(cls); }}, 1600);
+      }}
+    }}
+    // 主题同步（浅色/深色）与字号缩放。
+    if (msg.mdictTheme === true && typeof msg.mode === 'string') {{
+      // `data-theme` 属性驱动 article-style.css 里的 [data-theme=...] 覆盖规则，
+      // 属性变更即时生效，无需重新拉取样式表。
+      document.documentElement.setAttribute('data-theme', msg.mode);
+    }}
+    if (msg.mdictSettings === true && typeof msg.fontScale === 'number') {{
+      var body = document.querySelector('.mdict-dict-body');
+      if (body) {{
+        var base = 15 * msg.fontScale;
+        body.style.fontSize = base.toFixed(1) + 'px';
+        body.style.lineHeight = (1.65 * Math.min(1.15, 0.85 + msg.fontScale * 0.3)).toFixed(2);
+      }}
+    }}
+  }});
+}} )();
 </script>"#,
+        escape_js_string(&section.dict_id),
         escape_js_string(&section.dict_id),
         escape_js_string(&section.dict_id)
     );
@@ -209,6 +253,264 @@ fn render_dict_iframe_srcdoc(
         escape_html_attr(&section.dict_id),
         escaped
     )
+}
+
+// ============================================================
+// 词条元数据提取（供前端词头条 / 义项导航 / entry tab 使用）
+// ============================================================
+
+/// 一个独立词条（entry）的锚点信息。词典内同一记录常含多个 entry
+/// （如 go 的名词/动词/习语），前端据此渲染 tab 快速跳转。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct EntryMeta {
+    /// 该 entry 在 DOM 中的 `id`（用于 iframe 内 scrollIntoView）。
+    pub id: String,
+    /// 展示标签（如 "go 1"）。
+    pub label: String,
+}
+
+/// 一本词典条目的结构化元数据，供前端词头条与导航组件使用。
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct SectionMeta {
+    /// 词头（如 "go"；提取失败时为空串，由前端回退为查询词）。
+    pub headword: String,
+    /// 音标列表（去重，最多 4 个），如 ["/ɡəʊ/"]。
+    pub phonetics: Vec<String>,
+    /// 发音 URL（`/dict/{id}/audio/...` 或 `sound://` 原样保留），
+    /// 供词头条统一发音按钮使用。
+    pub audio: Option<String>,
+    /// 条目内多个 entry 的锚点列表（无 id 时为空）。
+    pub entries: Vec<EntryMeta>,
+    /// 义项（sense）数量，供义项导航使用；上限 99。
+    pub sense_count: usize,
+}
+
+static HWD_RE: OnceLock<Regex> = OnceLock::new();
+static PHONETIC_RE: OnceLock<Regex> = OnceLock::new();
+static SOUND_RE: OnceLock<Regex> = OnceLock::new();
+static CHWD_RE: OnceLock<Regex> = OnceLock::new();
+static CHWD_LINK_RE: OnceLock<Regex> = OnceLock::new();
+static ENTRY_ANCHOR_RE: OnceLock<Regex> = OnceLock::new();
+static ENTRY_TAG_RE: OnceLock<Regex> = OnceLock::new();
+static ENTRY_LINK_RE: OnceLock<Regex> = OnceLock::new();
+static SENSE_RE: OnceLock<Regex> = OnceLock::new();
+
+fn strip_tags(input: &str) -> String {
+    static TAG_RE: OnceLock<Regex> = OnceLock::new();
+    let re = TAG_RE.get_or_init(|| Regex::new(r"(?s)<[^>]+>").expect("valid tag regex"));
+    let cleaned = re.replace_all(input, " ").into_owned();
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// 从词典条目 HTML 中提取结构化元数据（词头 / 音标 / 发音 / entries / 义项数）。
+///
+/// 用启发式正则跨词典通用提取，不依赖某本词典的具体结构：
+/// - 词头：优先 `.hwd/.headword/.hw` 元素文本，回退 `entry://` 链接文本。
+/// - 音标：`.pron/.phon/.ipa/.amevarpron/.brvarpron` 等 class 的文本，去重截断。
+/// - 发音：第一个 `sound://...` 引用。
+/// - entries：带 `id` 且 class 含 `entry`/`entryhead` 的容器；label 取其块内
+///   第一个 `entry://` 链接或 `.hwd` 文本，失败时用 id 尾部（如 "go_1"）。
+/// - 义项数：class 中单词边界匹配 `sense` 的容器数量（`sensenum` 不会误命中，
+///   因为 `sense` 后紧跟 `num` 不构成单词边界）。
+pub fn extract_section_meta(html: &str, dict_id: &str) -> SectionMeta {
+    let hwd_re = HWD_RE.get_or_init(|| {
+        Regex::new(
+            r#"(?is)<[a-z][^>]*\bclass="[^"]*\b(?:hwd|headword|Headword|hw)\b[^"]*"[^>]*>(.*?)</[a-z]+>"#,
+        )
+        .expect("valid hwd regex")
+    });
+    let phon_re = PHONETIC_RE.get_or_init(|| {
+        Regex::new(
+            r#"(?is)<[a-z][^>]*\bclass="[^"]*\b(?:pron|PRON|phon|phonetic|ipa|IPA|amevarpron|brvarpron)\b[^"]*"[^>]*>(.*?)</[a-z]+>"#,
+        )
+        .expect("valid phonetic regex")
+    });
+    let sound_re = SOUND_RE.get_or_init(|| {
+        // 兼容两种形式：词典原文 `sound://path`，以及已被 rewrite_html 重写
+        // 成 `/dict/{id}/audio/path` 的 href/onclick 内容。
+        Regex::new(r#"(?i)(?:sound://|/dict/[^/"'<>]+/audio/)([^\s"'<>]+)"#)
+            .expect("valid sound regex")
+    });
+    let entry_tag_re = ENTRY_TAG_RE.get_or_init(|| {
+        // 捕获带 id 的 entry 容器开标签（class 与 id 顺序两种写法都覆盖）。
+        Regex::new(
+            r#"(?i)<[a-z][^>]*\bclass="[^"]*\b(?:entryhead|entry)\b[^"]*"[^>]*\bid="([^"]+)"[^>]*>|<[a-z][^>]*\bid="([^"]+)"[^>]*\bclass="[^"]*\b(?:entryhead|entry)\b[^"]*"[^>]*>"#,
+        )
+        .expect("valid entry tag regex")
+    });
+    // LDOCE 风格同形异义词列表：`<div class="chwd"><a href="#ANCHOR">verb</a> | <a href="#ANCHOR2">noun</a></div>`
+    let chwd_re = CHWD_RE.get_or_init(|| {
+        Regex::new(r#"(?is)<div[^>]*\bclass="[^"]*\bchwd\b[^"]*"[^>]*>(.*?)</div>"#)
+            .expect("valid chwd regex")
+    });
+    let chwd_link_re = CHWD_LINK_RE.get_or_init(|| {
+        Regex::new(r##"(?is)<a\b[^>]*\bhref="#([^"]+)"[^>]*>(.*?)</a>"##)
+            .expect("valid chwd link regex")
+    });
+    // 通用锚点式 entry：`<a name="X"></a>` 紧跟 entry 容器（LDOCE 的
+    // `<a name="..._go_1"></a><span class="entry">`）。要求"紧邻"可避免
+    // 误捕词典内的习语/短语锚点（它们后面跟的是短语容器而非 entry）。
+    let entry_anchor_re = ENTRY_ANCHOR_RE.get_or_init(|| {
+        Regex::new(
+            r#"(?is)<a\b[^>]*\b(?:name|id)="([^"]+)"[^>]*>\s*</a>\s*<(?:span|div|section)\b[^>]*\bclass="[^"]*\b(?:entryhead|entry)\b[^"]*""#,
+        )
+        .expect("valid entry anchor regex")
+    });
+    let entry_link_re = ENTRY_LINK_RE.get_or_init(|| {
+        Regex::new(r#"(?is)<a\b[^>]*href="entry://[^"]*"[^>]*>(.*?)</a>"#)
+            .expect("valid entry link regex")
+    });
+    let sense_re = SENSE_RE.get_or_init(|| {
+        Regex::new(r#"(?i)\bclass="[^"]*\bsense\b[^"]*""#).expect("valid sense regex")
+    });
+
+    let mut meta = SectionMeta::default();
+
+    // 词头
+    if let Some(caps) = hwd_re.captures(html) {
+        let text = strip_tags(&caps[1]);
+        if !text.is_empty() {
+            meta.headword = text.chars().take(40).collect();
+        }
+    }
+    if meta.headword.is_empty() {
+        if let Some(caps) = entry_link_re.captures(html) {
+            let text = strip_tags(&caps[1]);
+            if !text.is_empty() {
+                meta.headword = text.chars().take(40).collect();
+            }
+        }
+    }
+
+    // 音标
+    for caps in phon_re.captures_iter(html).take(4) {
+        let text = strip_tags(&caps[1]);
+        let text = text.trim().trim_matches('/').trim();
+        if text.is_empty() {
+            continue;
+        }
+        let normalized = format!("/{}/", text);
+        if !meta.phonetics.contains(&normalized) {
+            meta.phonetics.push(normalized);
+        }
+    }
+
+    // 发音
+    if let Some(caps) = sound_re.captures(html) {
+        let path = caps[1].trim();
+        if !path.is_empty() {
+            meta.audio = Some(format!("/dict/{}/audio/{}", dict_id, path));
+        }
+    }
+
+    // entries：三层提取，越靠前标签越准确——
+    // 1) LDOCE 风格 `div.chwd`（verb | noun 链接，带语义标签）
+    // 2) `<a name="X"></a>` 紧邻 entry 容器的锚点（通用兜底）
+    // 3) 带 id 的 entry/entryhead 容器（其余词典）
+    let mut collected: Vec<(String, String)> = Vec::new(); // (id, label)
+    macro_rules! push_entry {
+        ($id:expr, $label:expr) => {{
+            let id = $id;
+            let mut label = $label;
+            if id.is_empty() || id.len() > 120 {
+                continue;
+            }
+            if collected.iter().any(|(eid, _)| *eid == id) {
+                continue;
+            }
+            if label.is_empty() {
+                // 兜底：用 id 尾部（如 "LDOCE6_go_1" → "go 1"）。
+                label = id
+                    .rsplit('_')
+                    .take(2)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+            }
+            collected.push((
+                id,
+                label.chars().take(24).collect(),
+            ));
+        }};
+    }
+
+    if let Some(chwd) = chwd_re.captures(html) {
+        for link in chwd_link_re.captures_iter(&chwd[1]) {
+            let anchor = link[1].to_string();
+            // 确认锚点真实存在于文档中（name 或 id 均可），避免死链 tab。
+            let anchor_present =
+                html.contains(&format!(r#"name="{}""#, anchor))
+                    || html.contains(&format!(r#"id="{}""#, anchor));
+            if !anchor_present {
+                continue;
+            }
+            let label = strip_tags(&link[2]);
+            push_entry!(anchor, label);
+            if collected.len() >= 24 {
+                break;
+            }
+        }
+    }
+    if collected.is_empty() {
+        for caps in entry_anchor_re.captures_iter(html) {
+            let id = caps[1].to_string();
+            // 该锚点块内向后取 entry:// 链接或 .hwd 文本做 label。
+            let from = caps.get(0).map(|m| m.end()).unwrap_or(0);
+            let window_end = (from + 2000).min(html.len());
+            let window = &html[from..window_end];
+            let mut label = String::new();
+            if let Some(l) = entry_link_re.captures(window) {
+                label = strip_tags(&l[1]);
+            }
+            if label.is_empty() {
+                if let Some(h) = hwd_re.captures(window) {
+                    label = strip_tags(&h[1]);
+                }
+            }
+            push_entry!(id, label);
+            if collected.len() >= 24 {
+                break;
+            }
+        }
+    }
+    if collected.is_empty() {
+        for caps in entry_tag_re.captures_iter(html) {
+            let id = caps
+                .get(1)
+                .map(|m| m.as_str())
+                .or_else(|| caps.get(2).map(|m| m.as_str()))
+                .unwrap_or_default()
+                .to_string();
+            // 从该 entry 开头向后看一小段，取 entry:// 链接或 .hwd 文本做 label。
+            let from = caps.get(0).map(|m| m.end()).unwrap_or(0);
+            let window_end = (from + 2000).min(html.len());
+            let window = &html[from..window_end];
+            let mut label = String::new();
+            if let Some(l) = entry_link_re.captures(window) {
+                label = strip_tags(&l[1]);
+            }
+            if label.is_empty() {
+                if let Some(h) = hwd_re.captures(window) {
+                    label = strip_tags(&h[1]);
+                }
+            }
+            push_entry!(id, label);
+            if collected.len() >= 24 {
+                break;
+            }
+        }
+    }
+    meta.entries = collected
+        .into_iter()
+        .map(|(id, label)| EntryMeta { id, label })
+        .collect();
+
+    // 义项数
+    meta.sense_count = sense_re.find_iter(html).take(100).count().min(99);
+
+    meta
 }
 
 /// 从 sanitize 后的条目里提取 `<style>` 块与 `<link rel="stylesheet">`（词典
@@ -543,7 +845,10 @@ fn escape_html_attr(s: &str) -> String {
 mod tests {
     use std::collections::HashSet;
 
-    use super::{AggregateSection, dedup_styles, render_aggregate_html, sanitize_dict_html};
+    use super::{
+        AggregateSection, dedup_styles, extract_section_meta, render_aggregate_html,
+        sanitize_dict_html,
+    };
 
     fn stripped(input: &str) -> String {
         sanitize_dict_html(input)
@@ -768,5 +1073,118 @@ mod tests {
         // 事件属性/危险 URL 仍被净除。
         let html2 = render_aggregate_html("w", &[section("d1", r#"<img src="x" onclick="evil()"><p>A</p>"#)]);
         assert!(!html2.contains("onclick"));
+    }
+
+    // ---------- extract_section_meta ----------
+
+    #[test]
+    fn meta_extracts_headword_phonetics_and_audio() {
+        let html = concat!(
+            r#"<div class="entryhead"><span class="hwd">go</span>"#,
+            r#"<span class="pron">ɡəʊ</span>"#,
+            r#"<span class="PRON">goʊ</span>"#,
+            r#"<a onclick="play('sound://uk/go.mp3')">🔊</a>"#,
+            r#"</div><p>body</p>"#,
+        );
+        let meta = extract_section_meta(html, "ldoce");
+        assert_eq!(meta.headword, "go");
+        assert_eq!(meta.phonetics, vec!["/ɡəʊ/", "/goʊ/"]);
+        assert_eq!(meta.audio.as_deref(), Some("/dict/ldoce/audio/uk/go.mp3"));
+        assert_eq!(meta.sense_count, 0);
+        assert!(meta.entries.is_empty());
+    }
+
+    #[test]
+    fn meta_extracts_entries_and_sense_count() {
+        let html = concat!(
+            r#"<div id="LDOCE6_go_1" class="entry">"#,
+            r#"<span class="hwd">go</span>"#,
+            r#"<span class="sensenum">1</span><span class="sense"><span class="def">to move</span></span>"#,
+            r#"<span class="sensenum">2</span><span class="sense"><span class="def">to leave</span></span>"#,
+            r#"</div>"#,
+            r#"<div id="LDOCE6_go_2" class="entry">"#,
+            r#"<span class="hwd">go</span>"#,
+            r#"<span class="sensenum">1</span><span class="sense"><span class="def">attempt</span></span>"#,
+            r#"</div>"#,
+        );
+        let meta = extract_section_meta(html, "ldoce");
+        assert_eq!(meta.sense_count, 3);
+        assert_eq!(meta.entries.len(), 2);
+        assert_eq!(meta.entries[0].id, "LDOCE6_go_1");
+        assert_eq!(meta.entries[0].label, "go");
+        assert_eq!(meta.entries[1].id, "LDOCE6_go_2");
+    }
+
+    #[test]
+    fn meta_falls_back_to_entry_link_for_headword() {
+        let html = r#"<a href="entry://go">go</a><span class="pron">/ɡəʊ/</span>"#;
+        let meta = extract_section_meta(html, "d1");
+        assert_eq!(meta.headword, "go");
+        assert_eq!(meta.phonetics, vec!["/ɡəʊ/"]);
+    }
+
+    #[test]
+    fn meta_id_tail_fallback_label_and_entry_id_after_class() {
+        // class 在 id 之后、label 提取失败时用 id 尾部。
+        let html = r#"<div id="LDOCE6_go_1" class="entry">plain text only</div>"#;
+        let meta = extract_section_meta(html, "d1");
+        assert_eq!(meta.entries.len(), 1);
+        assert_eq!(meta.entries[0].id, "LDOCE6_go_1");
+        assert!(meta.entries[0].label.contains("go"));
+    }
+
+    #[test]
+    fn meta_ignores_sensenum_as_sense() {
+        // "sensenum" 不是独立单词 "sense"，不应计入义项数。
+        let html = r#"<span class="sensenum">1</span><span class="sensenum">2</span>"#;
+        let meta = extract_section_meta(html, "d1");
+        assert_eq!(meta.sense_count, 0);
+    }
+
+    #[test]
+    fn meta_extracts_ldoce_style_chwd_homograph_links() {
+        // LDOCE 风格：`div.chwd` 列出同形异义词（verb | noun），锚点用
+        // `<a name="...">` 而非 id；label 取链接文本。
+        let html = concat!(
+            r##"<div class="chwd"><a href="#X_LDOCE6_go_1"> <i>verb</i></a> | <a href="#X_LDOCE6_go_2"> <i>noun</i></a></div>"##,
+            r##"<a name="X_LDOCE6_go_1"></a><a name="X_go_1"></a><span class="entry"><span class="entryhead">go 1</span></span>"##,
+            r##"<a name="X_LDOCE6_go_2"></a><a name="X_go_2"></a><span class="entry">noun body</span>"##,
+            // 死链（chwd 里指向不存在的锚点）应被跳过。
+            r##"<a href="#X_missing"> ghost </a>"##,
+        );
+        let meta = extract_section_meta(html, "ldoce");
+        assert_eq!(meta.entries.len(), 2);
+        assert_eq!(meta.entries[0].id, "X_LDOCE6_go_1");
+        assert!(meta.entries[0].label.to_lowercase().contains("verb"));
+        assert_eq!(meta.entries[1].id, "X_LDOCE6_go_2");
+        assert!(meta.entries[1].label.to_lowercase().contains("noun"));
+    }
+
+    #[test]
+    fn meta_extracts_name_anchors_adjacent_to_entry() {
+        // 无 chwd 的词典：`<a name="X"></a>` 紧邻 entry 容器，label 用 id 尾部。
+        let html = concat!(
+            r##"<a name="abc_word_1"></a><div class="entry">body one</div>"##,
+            r##"<a name="abc_word_2"></a><div class="entry">body two</div>"##,
+            // 短语锚点后面跟的不是 entry 容器 → 不提取。
+            r##"<a name="abc_word_phrase_1"></a><div class="phrase">phrase body</div>"##,
+        );
+        let meta = extract_section_meta(html, "d1");
+        assert_eq!(meta.entries.len(), 2);
+        assert_eq!(meta.entries[0].id, "abc_word_1");
+        assert!(meta.entries[0].label.contains("word"));
+        assert_eq!(meta.entries[1].id, "abc_word_2");
+    }
+
+    #[test]
+    fn meta_dedupes_entry_ids() {
+        // chwd 与锚点路径命中同一 id 时只保留一次。
+        let html = concat!(
+            r##"<div class="chwd"><a href="#X_go_1">verb</a></div>"##,
+            r##"<a name="X_go_1"></a><span class="entry">go</span>"##,
+        );
+        let meta = extract_section_meta(html, "d1");
+        assert_eq!(meta.entries.len(), 1);
+        assert_eq!(meta.entries[0].id, "X_go_1");
     }
 }

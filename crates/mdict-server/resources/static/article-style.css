@@ -93,3 +93,40 @@
 	margin-top: 0.8em;
 	margin-bottom: 0.4em;
 }
+
+/* 义项/entry 滚动跳转后的闪烁高亮（父页通过 postMessage 触发） */
+.mdict-dict-body .mdict-scroll-flash {
+	animation: mdict-flash 1.6s ease-out;
+	border-radius: 6px;
+}
+
+@keyframes mdict-flash {
+	0% {
+		background-color: rgba(99, 102, 241, 0.35);
+		box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.2);
+	}
+	100% {
+		background-color: transparent;
+		box-shadow: 0 0 0 0 rgba(99, 102, 241, 0);
+	}
+}
+
+/* ============================================================
+   浅色主题（iframe 内部）：父页设置 <html data-theme="light">，
+   本层覆盖浅色下词典正文的通用配色。词典自带样式的 !important
+   规则仍优先；此处只兜底，保证"裸"词典在浅色下可读。
+   ============================================================ */
+html[data-theme="light"] .mdict-dict-body {
+	color: #2b3648;
+}
+
+html[data-theme="light"] .mdict-dict-body .example,
+html[data-theme="light"] .mdict-dict-body .colloexa,
+html[data-theme="light"] .mdict-dict-body .gramexa {
+	color: #4b5a70;
+}
+
+html[data-theme="light"] .mdict-dict-body .pron,
+html[data-theme="light"] .mdict-dict-body .amevarpron {
+	color: #64748b;
+}

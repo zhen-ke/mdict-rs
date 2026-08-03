@@ -12,7 +12,7 @@ use crate::config::DictInfo;
 use crate::lucky;
 use crate::query::{
     DictFilter, QueryError, detect_content_type, fuzzy_suggest, query, query_aggregate,
-    query_specific_entry, query_specific_resource, query_with_trace, suggest,
+    query_aggregate_json, query_specific_entry, query_specific_resource, query_with_trace, suggest,
 };
 use mdict_core::css_scope::scope_css;
 use mdict_core::indexing::index_status;
@@ -24,8 +24,8 @@ use std::path::{Path as FsPath, PathBuf};
 use axum::{
     body::Bytes,
     extract::{Form, Path, Query, State},
-    http::{HeaderMap, Uri},
-    response::{Json, Response},
+    http::{HeaderMap, StatusCode, Uri},
+    response::{IntoResponse, Json, Response},
 };
 use tokio::fs;
 
@@ -51,9 +51,13 @@ fn static_cache_control(request_path: &str) -> &'static str {
 
 #[derive(Deserialize, Debug)]
 pub struct SuggestQuery {
+    /// 缺省（如 `/lucky?format=json` 不带 q）时为空串，不参与幸运查询。
+    #[serde(default)]
     q: String,
     /// Optional comma-separated dict IDs to restrict search scope.
     dicts: Option<String>,
+    /// `json` 时 `/lucky` 返回结构化 JSON（同 `/query?format=json`）。
+    format: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -61,6 +65,8 @@ pub struct QueryForm {
     word: String,
     /// Optional comma-separated dict IDs to restrict search scope.
     dicts: Option<String>,
+    /// `json` 时返回结构化 JSON（词头条/义项导航所需元数据 + 完整聚合 HTML）。
+    format: Option<String>,
 }
 
 /// Parse an optional comma-separated dict-id string into a `DictFilter`.
@@ -96,8 +102,10 @@ async fn query_aggregate_cached(
     state: &AppState,
     word: String,
     filter: DictFilter,
+    format: &str,
 ) -> Result<Response, AppError> {
-    let cache_key = cache_key_aggregate_entry(&word, &filter);
+    let is_json = format == "json";
+    let cache_key = cache_key_aggregate_entry(&word, &filter, is_json);
     let negative_key = negative_key(&cache_key);
     if let Some((data, content_type)) = state.get_entry_cached(&cache_key) {
         return Ok(ok_response(data, &content_type));
@@ -108,7 +116,15 @@ async fn query_aggregate_cached(
 
     let query_word = word.clone();
     let result = spawn_blocking_query(state, "aggregate query", move |task_state| {
-        query_aggregate(&task_state, query_word, &filter)
+        if is_json {
+            query_aggregate_json(&task_state, query_word, &filter).and_then(|payload| {
+                serde_json::to_vec(&payload)
+                    .map(|bytes| (Bytes::from(bytes), "application/json".to_string()))
+                    .map_err(|e| QueryError::Internal(e.to_string()))
+            })
+        } else {
+            query_aggregate(&task_state, query_word, &filter)
+        }
     })
     .await?;
 
@@ -133,15 +149,25 @@ pub(crate) async fn handle_query(
 ) -> Result<Response, AppError> {
     let word = params.word.trim().to_string();
     let filter = parse_dict_filter(&params.dicts);
-    tracing::info!("Processing query for word: {}, filter: {:?}", word, filter);
-    query_aggregate_cached(&state, word, filter).await
+    let format = params.format.unwrap_or_default();
+    tracing::info!(
+        "Processing query for word: {}, filter: {:?}, format: {}",
+        word,
+        filter,
+        format
+    );
+    query_aggregate_cached(&state, word, filter, &format).await
 }
 
-pub(crate) async fn handle_lucky(State(state): State<AppState>) -> Result<Response, AppError> {
+pub(crate) async fn handle_lucky(
+    State(state): State<AppState>,
+    Query(params): Query<SuggestQuery>,
+) -> Result<Response, AppError> {
     let word = lucky::lucky_word(&state);
     tracing::info!("Lucky query for word: {}", word);
     // Lucky always queries all dicts — it's about discovery.
-    query_aggregate_cached(&state, word, None).await
+    let format = params.format.unwrap_or_default();
+    query_aggregate_cached(&state, word, None, &format).await
 }
 
 pub(crate) async fn handle_suggest(
@@ -794,10 +820,13 @@ async fn resolve_static_file(
     })
 }
 
-fn cache_key_aggregate_entry(word: &str, filter: &DictFilter) -> String {
-    let mut key = String::with_capacity("entry:aggregate:".len() + word.len() + 32);
+fn cache_key_aggregate_entry(word: &str, filter: &DictFilter, is_json: bool) -> String {
+    let mut key = String::with_capacity("entry:aggregate:".len() + word.len() + 40);
     key.push_str("entry:aggregate:");
     push_trimmed_lowercase(&mut key, word);
+    if is_json {
+        key.push_str(":json");
+    }
     if let Some(ids) = filter {
         // Deterministic key: sort dict IDs so {a,b} and {b,a} produce the same key.
         let mut sorted: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
@@ -954,4 +983,77 @@ pub(crate) async fn handle_dict_script(
 
     tracing::warn!("Dictionary config not found for id: {}", id);
     Err(AppError::NotFound)
+}
+
+// ============ Favorites (生词本) API ============
+
+/// GET /api/favorites - 全部收藏词
+pub(crate) async fn handle_favorites_list(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<String>>, AppError> {
+    let Some(store) = state.favorites() else {
+        return Err(AppError::Internal(
+            "favorites store unavailable".to_string(),
+        ));
+    };
+    let words = store
+        .list()
+        .map_err(|e| AppError::Internal(format!("favorites list failed: {e}")))?;
+    Ok(Json(words))
+}
+
+#[derive(Deserialize, Debug)]
+pub struct FavoriteForm {
+    word: String,
+}
+
+/// POST /api/favorites - 添加收藏（幂等）
+pub(crate) async fn handle_favorites_add(
+    State(state): State<AppState>,
+    Form(params): Form<FavoriteForm>,
+) -> Result<Response, AppError> {
+    let word = params.word.trim();
+    if word.is_empty() {
+        return Err(AppError::BadRequest("word must not be empty".to_string()));
+    }
+    let Some(store) = state.favorites() else {
+        return Err(AppError::Internal(
+            "favorites store unavailable".to_string(),
+        ));
+    };
+    store
+        .add(word)
+        .map_err(|e| AppError::Internal(format!("favorites add failed: {e}")))?;
+    Ok(StatusCode::CREATED.into_response())
+}
+
+/// DELETE /api/favorites - 清空收藏
+pub(crate) async fn handle_favorites_clear(
+    State(state): State<AppState>,
+) -> Result<Response, AppError> {
+    let Some(store) = state.favorites() else {
+        return Err(AppError::Internal(
+            "favorites store unavailable".to_string(),
+        ));
+    };
+    store
+        .clear()
+        .map_err(|e| AppError::Internal(format!("favorites clear failed: {e}")))?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// DELETE /api/favorites/{word} - 移除单个收藏
+pub(crate) async fn handle_favorites_remove(
+    State(state): State<AppState>,
+    Path(word): Path<String>,
+) -> Result<Response, AppError> {
+    let Some(store) = state.favorites() else {
+        return Err(AppError::Internal(
+            "favorites store unavailable".to_string(),
+        ));
+    };
+    store
+        .remove(&word)
+        .map_err(|e| AppError::Internal(format!("favorites remove failed: {e}")))?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }

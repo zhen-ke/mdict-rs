@@ -13,6 +13,7 @@ use rusqlite::OpenFlags;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::config::{DictConfig, DictInfo};
+use crate::favorites::FavoritesStore;
 use mdict_core::mdict::reader::{per_reader_cache_budget, MdxReader};
 
 /// 一本词典索引构建最近一次失败的快照，供 `/api/index/status` 暴露给前端/dashboard。
@@ -325,6 +326,7 @@ impl Clone for AppState {
             static_dir: self.static_dir.clone(),
             catalog: self.catalog.clone(),
             runtime: self.runtime.clone(),
+            favorites: self.favorites.clone(),
         }
     }
 }
@@ -339,6 +341,8 @@ pub struct AppState {
     /// 否则 watcher 在自己克隆上 `store`，对 axum 按请求克隆出的实例不可见。
     catalog: Arc<ArcSwap<DictCatalog>>,
     runtime: Arc<RuntimeState>,
+    /// 生词本存储（词典目录下 favorites.db）。打开失败时为 `None`（收藏不可用）。
+    favorites: Option<Arc<FavoritesStore>>,
 }
 
 impl AppState {
@@ -353,12 +357,14 @@ impl AppState {
 
         let catalog = DictCatalog::from_dict_files(&dict_files, &dict_dir);
         let runtime = RuntimeState::new(max_concurrent_blocking_queries);
+        let favorites = FavoritesStore::open(&dict_dir).map(Arc::new);
 
         Self {
             dict_dir: Arc::new(dict_dir),
             static_dir: Arc::new(static_dir),
             catalog: Arc::new(ArcSwap::new(Arc::new(catalog))),
             runtime: Arc::new(runtime),
+            favorites,
         }
     }
 
@@ -368,6 +374,11 @@ impl AppState {
 
     pub fn static_dir(&self) -> &Path {
         &self.static_dir
+    }
+
+    /// 生词本存储句柄；`None` 表示收藏功能不可用（数据库打开失败）。
+    pub(crate) fn favorites(&self) -> Option<&FavoritesStore> {
+        self.favorites.as_deref()
     }
 
     pub fn dict_text_files(&self) -> Vec<PathBuf> {

@@ -9,6 +9,12 @@ const CONFIG = {
 	HISTORY_KEY: "mdx_history", // localStorage 键名
 	COLLAPSE_KEY: "mdx_collapsed_dicts", // localStorage: 记住用户折叠的词典
 	DICT_FILTER_KEY: "mdx_dict_filter", // localStorage: 记住用户启用的词典
+	SETTINGS_KEY: "mdx_settings", // localStorage: 用户设置（字号/主题/自动发音/默认展开）
+	FAVORITES_KEY: "mdx_favorites", // 内存缓存：收藏词集合（与后端 /api/favorites 同步）
+	FONT_MIN: 13, // 字号范围（px）
+	FONT_MAX: 21,
+	FONT_DEFAULT: 15,
+	SENSE_NAV_MIN: 8, // 义项数超过该值时显示义项导航条
 };
 
 // 全局状态
@@ -17,6 +23,301 @@ let selectedIndex = -1;
 let currentQuery = ""; // 当前查询词，用于高亮
 let isNavigating = false; // 防止重复导航
 let allDicts = []; // [{id, name, ...}] 从 /api/dicts 加载
+let favorites = new Set(); // 收藏词集合
+let lastCachedWord = ""; // iframe 缓存对应的查询词（词变则清缓存）
+const iframeCache = new Map(); // word → dictId → iframe DOM 元素
+const SETTINGS_DEFAULTS = {
+	fontSize: CONFIG.FONT_DEFAULT,
+	theme: "dark", // dark | light | auto
+	autoPronounce: false,
+	defaultExpand: "first", // first | all
+};
+
+// =============================================
+// 用户设置（字号/主题/自动发音/默认展开）
+// =============================================
+
+function loadSettings() {
+	try {
+		const raw = localStorage.getItem(CONFIG.SETTINGS_KEY);
+		if (!raw) return { ...SETTINGS_DEFAULTS };
+		return { ...SETTINGS_DEFAULTS, ...JSON.parse(raw) };
+	} catch (_) {
+		return { ...SETTINGS_DEFAULTS };
+	}
+}
+
+function saveSettings(settings) {
+	try {
+		localStorage.setItem(CONFIG.SETTINGS_KEY, JSON.stringify(settings));
+	} catch (_) {}
+}
+
+/**
+ * 计算实际生效的主题模式（"auto" 跟随系统偏好）。
+ */
+function effectiveTheme(mode) {
+	if (mode === "auto") {
+		return window.matchMedia("(prefers-color-scheme: light)").matches
+			? "light"
+			: "dark";
+	}
+	return mode;
+}
+
+/**
+ * 应用主题：设置父页 <html data-theme>，并广播到所有词典 iframe 沙箱。
+ */
+function applyTheme(mode, broadcast = true) {
+	const settings = loadSettings();
+	settings.theme = mode;
+	saveSettings(settings);
+	const effective = effectiveTheme(mode);
+	document.documentElement.setAttribute("data-theme", effective);
+	if (broadcast) {
+		broadcastToFrames({ mdictTheme: true, mode: effective });
+	}
+}
+
+/**
+ * 应用字号：设置父页 CSS 变量，并广播到所有词典 iframe 沙箱。
+ */
+function applyFontSize(size, broadcast = true) {
+	const settings = loadSettings();
+	settings.fontSize = Math.max(CONFIG.FONT_MIN, Math.min(CONFIG.FONT_MAX, size));
+	saveSettings(settings);
+	document.documentElement.style.setProperty(
+		"--mdict-font-scale",
+		String(settings.fontSize / CONFIG.FONT_DEFAULT),
+	);
+	$("#font-size-val").text(settings.fontSize);
+	if (broadcast) {
+		broadcastToFrames({
+			mdictSettings: true,
+			fontScale: settings.fontSize / CONFIG.FONT_DEFAULT,
+		});
+	}
+}
+
+/**
+ * 向当前所有词典 iframe 广播一条消息（opaque 沙箱下唯一的通信通道）。
+ * iframe 可能尚未加载完（srcdoc 异步解析），故立即发 + 延迟补发。
+ */
+function broadcastToFrames(msg) {
+	$("#mdx-resp .mdict-dict-iframe").each(function () {
+		try {
+			if (this.contentWindow) this.contentWindow.postMessage(msg, "*");
+		} catch (_) {}
+	});
+	setTimeout(() => {
+		$("#mdx-resp .mdict-dict-iframe").each(function () {
+			try {
+				if (this.contentWindow) this.contentWindow.postMessage(msg, "*");
+			} catch (_) {}
+		});
+	}, 300);
+}
+
+function initSettings() {
+	const settings = loadSettings();
+	applyFontSize(settings.fontSize, false);
+	document.documentElement.setAttribute(
+		"data-theme",
+		effectiveTheme(settings.theme),
+	);
+	$("#auto-pronounce").prop("checked", settings.autoPronounce);
+	$('#expand-group .settings-seg[data-expand-opt="' + settings.defaultExpand + '"]')
+		.addClass("active");
+	$('#theme-group .settings-seg[data-theme-opt="' + settings.theme + '"]')
+		.addClass("active");
+	// 跟随系统偏好变化
+	window
+		.matchMedia("(prefers-color-scheme: light)")
+		.addEventListener("change", () => {
+			if (loadSettings().theme === "auto") {
+				document.documentElement.setAttribute(
+					"data-theme",
+					effectiveTheme("auto"),
+				);
+				broadcastToFrames({
+					mdictTheme: true,
+					mode: effectiveTheme("auto"),
+				});
+			}
+		});
+}
+
+// 设置面板交互
+$(document).on("click", "#settings-btn", (e) => {
+	e.stopPropagation();
+	const $panel = $("#settings-panel");
+	const $fav = $("#fav-dropdown");
+	$fav.hide();
+	$panel.toggle();
+});
+
+$(document).on("click", "#font-minus", () => {
+	applyFontSize(loadSettings().fontSize - 1);
+});
+$(document).on("click", "#font-plus", () => {
+	applyFontSize(loadSettings().fontSize + 1);
+});
+$(document).on("click", "#theme-group .settings-seg", function () {
+	$("#theme-group .settings-seg").removeClass("active");
+	$(this).addClass("active");
+	applyTheme($(this).data("theme-opt"));
+});
+$(document).on("click", "#expand-group .settings-seg", function () {
+	const settings = loadSettings();
+	settings.defaultExpand = $(this).data("expand-opt");
+	saveSettings(settings);
+	$("#expand-group .settings-seg").removeClass("active");
+	$(this).addClass("active");
+});
+$(document).on("change", "#auto-pronounce", function () {
+	const settings = loadSettings();
+	settings.autoPronounce = $(this).prop("checked");
+	saveSettings(settings);
+});
+// 点击页面其他区域关闭面板
+$(document).on("click", (e) => {
+	if (!$(e.target).closest("#settings-panel").length) {
+		$("#settings-panel").hide();
+	}
+});
+
+// =============================================
+// 生词本 / 收藏
+// =============================================
+
+/**
+ * 从后端加载收藏列表并缓存到内存。
+ */
+function loadFavorites() {
+	$.getJSON("./api/favorites")
+		.done((words) => {
+			favorites = new Set(Array.isArray(words) ? words : []);
+			updateFavBadge();
+			updateStarButtons();
+		})
+		.fail(() => {
+			// 后端不可用时静默降级（收藏功能不可用）。
+		});
+}
+
+/**
+ * 添加/移除收藏，并同步后端。
+ */
+function toggleFavorite(word) {
+	const w = (word || "").trim();
+	if (!w) return Promise.resolve(false);
+	const adding = !favorites.has(w);
+	// 添加走 POST /api/favorites（form 提交 word）；删除走 DELETE /api/favorites/{word}
+	const req = adding
+		? $.ajax({ url: "./api/favorites", type: "POST", data: { word: w } })
+		: $.ajax({ url: "./api/favorites/" + encodeURIComponent(w), type: "DELETE" });
+	return req
+		.then(() => {
+			if (adding) {
+				favorites.add(w);
+			} else {
+				favorites.delete(w);
+			}
+			updateFavBadge();
+			updateStarButtons();
+			return adding;
+		})
+		.fail(() => false);
+}
+
+/**
+ * 更新搜索栏收藏按钮上的数量徽标。
+ */
+function updateFavBadge() {
+	const $btn = $("#fav-btn");
+	if (favorites.size > 0) {
+		$btn.show();
+		$("#fav-count")
+			.text(favorites.size > 99 ? "99+" : favorites.size)
+			.show();
+	} else {
+		$("#fav-count").hide();
+	}
+}
+
+/**
+ * 根据当前收藏状态更新词头条的星标按钮。
+ */
+function updateStarButtons() {
+	const $star = $("#hw-star");
+	if (!$star.length) return;
+	const word = ($(".hw-word", "#headword-bar").text() || "").trim();
+	if (!word) return;
+	const active = favorites.has(word);
+	$star.toggleClass("active", active);
+	$star.attr("title", active ? "取消收藏" : "收藏");
+	$star.find("use").attr("href", active ? "#icon-star-filled" : "#icon-star");
+}
+
+// 收藏按钮（搜索栏）
+$(document).on("click", "#fav-btn", (e) => {
+	e.stopPropagation();
+	const $fav = $("#fav-dropdown");
+	$("#settings-panel").hide();
+	if ($fav.is(":visible")) {
+		$fav.hide();
+		return;
+	}
+	renderFavorites();
+	$fav.toggle();
+});
+
+/**
+ * 渲染收藏列表下拉框。
+ */
+function renderFavorites() {
+	const $list = $("#fav-list");
+	$list.empty();
+	const words = [...favorites].sort((a, b) => a.localeCompare(b));
+	if (words.length === 0) {
+		$list.append('<li class="fav-empty">还没有收藏，点词头条的 ☆ 收藏</li>');
+		return;
+	}
+	words.forEach((word) => {
+		$('<li data-word="' + $("<div>").text(word).html() + '"></li>')
+			.text(word)
+			.appendTo($list);
+	});
+}
+
+// 点击收藏词条跳转查询
+$(document).on("click", "#fav-list li[data-word]", function () {
+	const word = $(this).data("word");
+	if (!word) return;
+	$("#word").val(word);
+	$("#fav-dropdown").hide();
+	queryMdx(word);
+});
+
+// 清空收藏
+$(document).on("click", "#clear-favs", (e) => {
+	e.stopPropagation();
+	$.ajax({ url: "./api/favorites", type: "DELETE" })
+		.done(() => {
+			favorites.clear();
+			updateFavBadge();
+			updateStarButtons();
+			renderFavorites();
+		})
+		.fail(() => {});
+});
+
+// 词头条星标
+$(document).on("click", "#hw-star", function (e) {
+	e.stopPropagation();
+	const word = $(this).data("word");
+	if (word) toggleFavorite(word);
+});
 
 // =============================================
 // 词典折叠/展开 + 快速导航
@@ -91,6 +392,8 @@ function enhanceAggregateResult() {
 		collapsed.size === 0 && !localStorage.getItem(CONFIG.COLLAPSE_KEY);
 
 	// 1. 添加折叠箭头 + 恢复折叠状态
+	//    首次访问：默认只展开第 1 本（设置里可选"全部展开"）；后续按用户偏好。
+	const defaultExpandAll = loadSettings().defaultExpand === "all";
 	$sections.each(function (idx) {
 		const $sec = $(this);
 		const $head = $sec.find(".mdict-dict-head");
@@ -103,7 +406,7 @@ function enhanceAggregateResult() {
 
 		// 首次访问：只展开第 1 个；后续按用户偏好
 		if (isFirstVisit) {
-			if (idx > 0) $sec.addClass("collapsed");
+			if (!defaultExpandAll && idx > 0) $sec.addClass("collapsed");
 		} else {
 			if (collapsed.has(dictId)) $sec.addClass("collapsed");
 		}
@@ -113,7 +416,7 @@ function enhanceAggregateResult() {
 	if (isFirstVisit) {
 		const initCollapsed = new Set();
 		$sections.each(function (idx) {
-			if (idx > 0) initCollapsed.add($(this).data("dict-id"));
+			if (!defaultExpandAll && idx > 0) initCollapsed.add($(this).data("dict-id"));
 		});
 		saveCollapsedDicts(initCollapsed);
 	}
@@ -589,7 +892,7 @@ function queryMdxFromNavigation(word) {
 	hideHistoryDropdown();
 	hideSuggestions();
 
-	const navData = { word: word };
+	const navData = { word: word, format: "json" };
 	const dictsP = buildDictsParam();
 	if (dictsP) navData.dicts = dictsP;
 
@@ -597,13 +900,11 @@ function queryMdxFromNavigation(word) {
 		url: "./query",
 		type: "POST",
 		data: navData,
-		dataType: "html",
-		success: (data) => {
+		dataType: "json",
+		success: (payload) => {
 			isNavigating = false;
-			if (data && data.trim() !== "" && !data.includes("not found")) {
-				const highlighted = highlightSearchTerm(data, currentQuery);
-				$("#mdx-resp").html(highlighted).show();
-				enhanceAggregateResult();
+			if (payload && payload.html && payload.hit_count > 0) {
+				renderQueryResult(payload);
 				$("#share-btn").show();
 				document.title = word + " - MDict 极速词典";
 			} else {
@@ -621,10 +922,267 @@ function queryMdxFromNavigation(word) {
 	});
 }
 
+// =============================================
+// 查询结果渲染管线（JSON 端点）
+// =============================================
+
+/**
+ * 渲染聚合查询结果：
+ *   1. 词形变化提示条（word ≠ matched 时）
+ *   2. 统一词头条（词头 / 音标 / 发音 / 收藏）
+ *   3. 词典 iframe 复用缓存（同一词重复查询不重建 iframe）
+ *   4. 每本词典的 entry tab + 义项导航
+ *   5. 折叠偏好恢复 + 快速导航（复用 enhanceAggregateResult）
+ *   6. 自动发音（设置开启时）
+ */
+function renderQueryResult(payload) {
+	currentQuery = payload.word;
+	const $aggregate = $(payload.html);
+	const wk = cacheKeyFor(payload.word);
+
+	// --- 词形变化提示 ---
+	showFormBanner(payload.word, payload.matched);
+
+	// --- iframe 复用缓存：词变了才整体重建；同词反复查询只移动缓存 iframe ---
+	if (lastCachedWord && lastCachedWord !== wk) {
+		iframeCache.clear();
+	}
+	lastCachedWord = wk;
+	if (!iframeCache.has(wk)) iframeCache.set(wk, new Map());
+	const wordFrames = iframeCache.get(wk);
+	$aggregate.find(".mdict-dict-section").each(function () {
+		const dictId = $(this).data("dict-id");
+		const $frame = $(this).find(".mdict-dict-frame");
+		const cached = wordFrames.get(dictId);
+		if (cached) {
+			$frame.empty().append(cached);
+		} else {
+			const iframeEl = $frame.find(".mdict-dict-iframe")[0];
+			if (iframeEl) wordFrames.set(dictId, iframeEl);
+		}
+	});
+
+	$("#mdx-resp").html($aggregate).show();
+
+	// --- 词头条 ---
+	renderHeadwordBar(payload);
+
+	// --- entry tab / 义项导航 ---
+	setupEntryTabs(payload);
+	setupSenseNav(payload);
+
+	// --- 折叠偏好 + 词典导航 pill ---
+	enhanceAggregateResult();
+
+	// --- 自动发音 ---
+	const settings = loadSettings();
+	if (settings.autoPronounce) {
+		const firstAudio = firstAudioUrl(payload);
+		if (firstAudio) {
+			setTimeout(() => playAudioUrl(firstAudio), 350);
+		}
+	}
+
+	updateStarButtons();
+}
+
+function cacheKeyFor(word) {
+	return (word || "").trim().toLowerCase();
+}
+
+/**
+ * 词形变化提示条：查询词与最终命中词不一致时展示（如 went → go）。
+ */
+function showFormBanner(word, matched) {
+	const $b = $("#form-banner");
+	const w = (word || "").trim();
+	const m = (matched || "").trim();
+	if (!w || !m || w.toLowerCase() === m.toLowerCase()) {
+		$b.hide().empty();
+		return;
+	}
+	$b.empty();
+	$b.append($("<span></span>").text("「" + w + "」未直接收录，已显示「" + m + "」的释义："));
+	$b.append(
+		$('<button class="form-banner-link"></button>')
+			.text("查询 " + m)
+			.on("click", () => {
+				$("#word").val(m);
+				queryMdx(m);
+			}),
+	);
+	$b.show();
+}
+
+/**
+ * 取第一本有发音的词典的音频 URL。
+ */
+function firstAudioUrl(payload) {
+	for (const s of payload.sections || []) {
+		if (s.audio) return s.audio;
+	}
+	return null;
+}
+
+/**
+ * 渲染统一词头条：词头 + 音标 + 发音按钮 + 收藏星标 + 命中统计。
+ */
+function renderHeadwordBar(payload) {
+	const $bar = $("#headword-bar");
+	if (!payload || !payload.sections || payload.sections.length === 0) {
+		$bar.hide().empty();
+		return;
+	}
+
+	const phonetics = [];
+	let audioUrl = null;
+	let headword = payload.matched || payload.word;
+	for (const s of payload.sections) {
+		if (s.headword) {
+			headword = s.headword;
+			break;
+		}
+	}
+	for (const s of payload.sections) {
+		if (!audioUrl && s.audio) audioUrl = s.audio;
+		for (const p of s.phonetics || []) {
+			if (!phonetics.includes(p)) phonetics.push(p);
+		}
+	}
+
+	const isFav = favorites.has(headword);
+	$bar.empty().show();
+
+	const $main = $('<div class="hw-main"></div>');
+	$main.append(
+		$('<button id="hw-star" class="hw-star' + (isFav ? " active" : "") + '" title="' + (isFav ? "取消收藏" : "收藏") + '"></button>')
+			.data("word", headword)
+			.append(
+				'<svg class="icon"><use href="#icon-' + (isFav ? "star-filled" : "star") + '"/></svg>',
+			),
+	);
+	$main.append($('<span class="hw-word"></span>').text(headword));
+	if (phonetics.length > 0) {
+		$main.append($('<span class="hw-phonetics"></span>').text(phonetics.join(" · ")));
+	}
+	if (audioUrl) {
+		$main.append(
+			$('<button id="hw-audio" class="hw-audio" title="发音"></button>')
+				.data("url", audioUrl)
+				.append('<svg class="icon"><use href="#icon-speaker"/></svg>'),
+		);
+	}
+	$bar.append($main);
+
+	const $sub = $('<div class="hw-sub"></div>');
+	$sub.append(
+		$('<span class="hw-count"></span>').text("命中 " + payload.hit_count + " 本词典"),
+	);
+	if (payload.word && payload.word.toLowerCase() !== headword.toLowerCase()) {
+		$sub.append($('<span class="hw-form-hint"></span>').text(headword + " ← " + payload.word));
+	}
+	$bar.append($sub);
+}
+
+// 词头条发音按钮
+$(document).on("click", "#hw-audio", function () {
+	const url = $(this).data("url");
+	if (url) playAudioUrl(url);
+});
+
+/**
+ * 每本词典的 entry tab 导航：词典内多个 entry 时渲染 tab 行，
+ * 点击通过 postMessage 让 iframe 沙箱滚动到对应锚点。
+ */
+function setupEntryTabs(payload) {
+	const metaById = {};
+	(payload.sections || []).forEach((s) => (metaById[s.dict_id] = s));
+
+	$("#mdx-resp .mdict-dict-section").each(function () {
+		const $sec = $(this);
+		const dictId = $sec.data("dict-id");
+		const meta = metaById[dictId];
+		if (!meta || !meta.entries || meta.entries.length <= 1) return;
+
+		const $tabs = $('<div class="mdict-entry-tabs"></div>');
+		meta.entries.forEach((entry, i) => {
+			$('<button class="mdict-entry-tab' + (i === 0 ? " active" : "") + '" data-target=""></button>')
+				.data("target", entry.id)
+				.attr("title", entry.label)
+				.text(entry.label)
+				.appendTo($tabs);
+		});
+		$sec.find(".mdict-dict-frame").before($tabs);
+	});
+}
+
+$(document).on("click", ".mdict-entry-tab", function () {
+	const $sec = $(this).closest(".mdict-dict-section");
+	const dictId = $sec.data("dict-id");
+	const target = $(this).data("target");
+	$sec.find(".mdict-entry-tab").removeClass("active");
+	$(this).addClass("active");
+	if (dictId && target) {
+		postToFrame(dictId, { mdictScroll: true, dictId: dictId, target: target });
+	}
+});
+
+/**
+ * 义项导航条：义项数超过阈值时渲染 1..N 数字条，点击跳转到对应义项。
+ */
+function setupSenseNav(payload) {
+	const metaById = {};
+	(payload.sections || []).forEach((s) => (metaById[s.dict_id] = s));
+
+	$("#mdx-resp .mdict-dict-section").each(function () {
+		const $sec = $(this);
+		const dictId = $sec.data("dict-id");
+		const meta = metaById[dictId];
+		if (!meta || meta.sense_count <= CONFIG.SENSE_NAV_MIN) return;
+
+		const $nav = $(
+			'<div class="mdict-sense-nav"><span class="sense-nav-label">义项</span></div>',
+		);
+		for (let i = 1; i <= meta.sense_count; i++) {
+			$('<button class="sense-nav-item" title="义项 ' + i + '"></button>')
+				.data("idx", i - 1)
+				.text(i)
+				.appendTo($nav);
+		}
+		$sec.find(".mdict-dict-frame").before($nav);
+	});
+}
+
+$(document).on("click", ".sense-nav-item", function () {
+	const $sec = $(this).closest(".mdict-dict-section");
+	const dictId = $sec.data("dict-id");
+	const idx = $(this).data("idx");
+	if (dictId && typeof idx === "number") {
+		postToFrame(dictId, { mdictScroll: true, dictId: dictId, index: idx });
+	}
+});
+
+/**
+ * 向指定词典的 iframe 沙箱发送消息（opaque origin 下的唯一通道）。
+ */
+function postToFrame(dictId, msg) {
+	$(
+		'#mdx-resp .mdict-dict-iframe[data-dict-id="' +
+			String(dictId).replace(/"/g, "") +
+			'"]',
+	).each(function () {
+		try {
+			if (this.contentWindow) this.contentWindow.postMessage(msg, "*");
+		} catch (_) {}
+	});
+}
+
 /**
  * 显示欢迎页面
  */
 function showWelcome() {
+	$("#headword-bar").hide().empty();
+	$("#form-banner").hide().empty();
 	$("#mdx-resp").html(`
         <div class="empty-state">
             <div class="empty-state-icon"><svg class="icon"><use href="#icon-search"/></svg></div>
@@ -642,6 +1200,8 @@ window.addEventListener("popstate", handlePopState);
 $(document).ready(() => {
 	initHistoryDropdown();
 	initDictFilter();
+	initSettings();
+	loadFavorites();
 	setupFrameResizeListener();
 
 	// 调试开关：URL 含 ?debug 时露出词典 ID / 调试信息
@@ -768,6 +1328,8 @@ function showError(message) {
 
 function showEmpty() {
 	$("#share-btn").hide();
+	$("#headword-bar").hide().empty();
+	$("#form-banner").hide().empty();
 	$("#mdx-resp").html(`
         <div class="empty-state">
             <div class="empty-state-icon"><svg class="icon"><use href="#icon-search"/></svg></div>
@@ -950,7 +1512,7 @@ function queryMdx(word, updateHistory = true, anchorId = "") {
 		updateUrl(word, updateHistory);
 	}
 
-	const queryData = { word: word };
+	const queryData = { word: word, format: "json" };
 	const dictsParam = buildDictsParam();
 	if (dictsParam) queryData.dicts = dictsParam;
 
@@ -958,22 +1520,16 @@ function queryMdx(word, updateHistory = true, anchorId = "") {
 		url: "./query",
 		type: "POST",
 		data: queryData,
-		dataType: "html",
-		success: (data) => {
-			if (data && data.trim() !== "" && !data.includes("not found")) {
+		dataType: "json",
+		success: (payload) => {
+			if (payload && payload.html && payload.hit_count > 0) {
 				// 保存到历史
 				saveHistory(word);
 
-				// 高亮搜索词
-				const highlighted = highlightSearchTerm(data, currentQuery);
-
-				$("#mdx-resp").html(highlighted).show();
-				enhanceAggregateResult();
+				renderQueryResult(payload);
 				if (anchorId) {
 					setTimeout(() => scrollToAnchor(anchorId), 50);
 				}
-
-				// 添加复制按钮
 
 				// 显示分享按钮
 				$("#share-btn").show();
@@ -1402,13 +1958,14 @@ $(document).on("click", "#lucky-btn", (e) => {
 	} else {
 		// 输入框为空时，执行"试试手气"
 		$.ajax({
-			url: "./lucky",
+			url: "./lucky?format=json",
 			type: "GET",
-			dataType: "html",
-			success: (data) => {
-				if (data && data.trim() !== "") {
-					$("#mdx-resp").html(data).show();
-					enhanceAggregateResult();
+			dataType: "json",
+			success: (payload) => {
+				if (payload && payload.html && payload.hit_count > 0) {
+					currentQuery = payload.word || "";
+					$("#word").val(payload.word || "");
+					renderQueryResult(payload);
 				} else {
 					showEmpty();
 				}

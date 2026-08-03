@@ -2,8 +2,9 @@ use crate::app_state::{AppState, DictCatalog};
 use crate::config::{DictConfig, get_dict_dir, scan_dict_files, static_path};
 use crate::handlers::{
     handle_dict_audio, handle_dict_entry, handle_dict_list, handle_dict_res, handle_dict_resource,
-    handle_dict_script, handle_dict_style, handle_index_status, handle_lucky, handle_query,
-    handle_resource, handle_suggest, handle_suggest_fuzzy, handle_trace,
+    handle_dict_script, handle_dict_style, handle_favorites_add, handle_favorites_clear,
+    handle_favorites_list, handle_favorites_remove, handle_index_status, handle_lucky,
+    handle_query, handle_resource, handle_suggest, handle_suggest_fuzzy, handle_trace,
 };
 use mdict_core::indexing::{IndexJob, db_path, index_up_to_date, indexing};
 
@@ -22,6 +23,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 mod app_state;
 mod config;
+mod favorites;
 mod handlers;
 mod lucky;
 mod query;
@@ -105,6 +107,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .route("/api/index/status", get(handle_index_status))
         .route("/api/dict/style", get(handle_dict_style))
         .route("/api/dict/script", get(handle_dict_script))
+        .route("/api/favorites", get(handle_favorites_list))
+        .route("/api/favorites", post(handle_favorites_add))
+        .route("/api/favorites", axum::routing::delete(handle_favorites_clear))
+        .route(
+            "/api/favorites/{word}",
+            axum::routing::delete(handle_favorites_remove),
+        )
         .route("/dict/{id}/entry/{*word}", get(handle_dict_entry))
         .route("/dict/{id}/res/{*path}", get(handle_dict_res))
         .route("/dict/{id}/audio/{*path}", get(handle_dict_audio))

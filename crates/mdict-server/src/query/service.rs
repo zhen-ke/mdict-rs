@@ -9,7 +9,10 @@ use tracing::{debug, info, warn};
 use crate::app_state::AppState;
 
 use mdict_core::fuzzy::{FuzzySuggestion, fuzzy_suggest as fuzzy_suggest_one};
-use mdict_core::presenter::{AggregateSection, render_aggregate_html};
+use mdict_core::presenter::{
+    AggregateSection, EntryMeta, extract_section_meta, render_aggregate_html,
+};
+use serde::Serialize;
 
 use super::canonical_normalize;
 use super::entry_query_candidates;
@@ -18,7 +21,7 @@ use super::repository::{
     EntryCandidateLookup, MAX_RESOURCE_RECORD_BYTES, detect_content_type, lookup_entry_candidate,
     lookup_entry_candidate_normalized, lookup_record_in_file, rewrite_entry_html_record,
 };
-use super::specific::query_specific_entry;
+use super::specific::query_specific_entry_with_final;
 
 /// Optional dict-id filter.  `None` = query all dicts (backward compatible).
 pub type DictFilter = Option<HashSet<String>>;
@@ -398,9 +401,108 @@ fn query_aggregate_entries(
     word: &str,
     filter: &DictFilter,
 ) -> Result<(Bytes, String), QueryError> {
+    let results = collect_aggregate_sections(state, word, filter)?;
+    if results.is_empty() {
+        return Err(QueryError::NotFound);
+    }
+    let sections: Vec<AggregateSection> = results
+        .into_iter()
+        .map(|r| r.section)
+        .collect();
+    let html = render_aggregate_html(word, &sections);
+    Ok((Bytes::from(html), "text/html".to_string()))
+}
+
+/// 聚合查询的 JSON 载荷：完整聚合 HTML（含 iframe 沙箱）+ 每本词典的结构化
+/// 元数据（词头/音标/发音/entries/义项数），供前端词头条、义项导航等使用。
+#[derive(Debug, Serialize)]
+pub struct QueryJsonPayload {
+    /// 用户查询词（未归一）。
+    pub word: String,
+    /// 词形归一/重定向后的最终命中词；与 `word` 不同时前端展示"词形变化"提示。
+    pub matched: String,
+    /// 命中词典数。
+    pub hit_count: usize,
+    /// 完整聚合 HTML（与 `/query` 的 HTML 响应同构，前端直接插入）。
+    pub html: String,
+    /// 每本词典的结构化元数据（顺序与 html 内 section 一致）。
+    pub sections: Vec<QueryJsonSection>,
+}
+
+/// 单本词典的结构化元数据。
+#[derive(Debug, Serialize)]
+pub struct QueryJsonSection {
+    pub dict_id: String,
+    pub title: String,
+    pub headword: String,
+    pub phonetics: Vec<String>,
+    pub audio: Option<String>,
+    pub entries: Vec<EntryMeta>,
+    pub sense_count: usize,
+}
+
+/// 聚合查询（JSON 版）：供 `/query?format=json` 使用。
+pub fn query_aggregate_json(
+    state: &AppState,
+    word: String,
+    filter: &DictFilter,
+) -> Result<QueryJsonPayload, QueryError> {
+    if is_resource_key(&word) {
+        return Err(QueryError::InvalidInput(
+            "resource keys are not supported by the JSON endpoint".to_string(),
+        ));
+    }
+    let results = collect_aggregate_sections(state, &word, filter)?;
+    if results.is_empty() {
+        return Err(QueryError::NotFound);
+    }
+
+    let matched = results[0].matched.clone();
+    let hit_count = results.len();
+    let sections: Vec<AggregateSection> = results
+        .into_iter()
+        .map(|r| r.section)
+        .collect();
+    let html = render_aggregate_html(&word, &sections);
+
+    let meta_sections: Vec<QueryJsonSection> = sections
+        .into_iter()
+        .map(|section| {
+            let raw = match std::str::from_utf8(&section.body) {
+                Ok(s) => s.to_string(),
+                Err(_) => String::from_utf8_lossy(&section.body).into_owned(),
+            };
+            let meta = extract_section_meta(&raw, &section.dict_id);
+            QueryJsonSection {
+                dict_id: section.dict_id,
+                title: section.title,
+                headword: meta.headword,
+                phonetics: meta.phonetics,
+                audio: meta.audio,
+                entries: meta.entries,
+                sense_count: meta.sense_count,
+            }
+        })
+        .collect();
+
+    Ok(QueryJsonPayload {
+        word,
+        matched,
+        hit_count,
+        html,
+        sections: meta_sections,
+    })
+}
+
+/// 聚合查询的条目收集（含最终命中词），供 HTML/JSON 两个端点共用。
+fn collect_aggregate_sections(
+    state: &AppState,
+    word: &str,
+    filter: &DictFilter,
+) -> Result<Vec<AggregateEntryResult>, QueryError> {
     // Collect (file, dict_id) pairs up front so we can fan out the per-dict
     // lookups in parallel. Each lookup is independent: it takes its own pooled
-    // SQLite connection and mmap reader, follows @@@LINK redirects within
+    // SQLite connection and mmap reader, follows @@@LINK= redirects within
     // the same file, and produces a single HTML body. rayon preserves input
     // order, so the rendered sections stay in scan order.
     let files = state.dict_text_files();
@@ -413,38 +515,43 @@ fn query_aggregate_entries(
         return Err(QueryError::NotFound);
     }
 
-    let sections: Vec<AggregateSection> = tasks
+    let sections: Vec<AggregateEntryResult> = tasks
         .par_iter()
         .filter_map(
-            |&(file, ref dict_id)| match query_specific_entry(state, file, word, dict_id) {
-                Ok(Some((data, _))) => {
-                    // 直接存原始 `Bytes`（Arc 共享、零拷贝）， санitize 推迟到
-                    // `render_aggregate_html` 里一次性完成，避免这里先 `to_owned`
-                    // 成 `String` 再 sanitize 的二道拷贝。
-                    let title = state.get_dict_display_name(file);
-                    let container_class = state.get_dict_container_class(file);
-                    // 词典级自定义 CSS/JS（<dict>.toml 的 css/js 字段，支持内联或
-                    // @file 引用）——注入该词典的 iframe 沙箱文档。内容在
-                    // AppState 建 catalog 时已一次性解析（@file 读盘不落在
-                    // 查询热路径上，见 `get_extra_css/js`）。
-                    let extra_css = state.get_extra_css(dict_id);
-                    let extra_js = state.get_extra_js(dict_id);
-                    Some(AggregateSection {
-                        dict_id: dict_id.clone(),
-                        title,
-                        container_class,
-                        extra_css,
-                        extra_js,
-                        body: data,
-                    })
-                }
-                Ok(None) => None,
-                Err(e) => {
-                    warn!(
-                        "dict entry query failed for {:?}, word '{}': {}",
-                        file, word, e
-                    );
-                    None
+            |&(file, ref dict_id)| {
+                match query_specific_entry_with_final(state, file, word, dict_id) {
+                    Ok(Some((data, _, matched))) => {
+                        // 直接存原始 `Bytes`（Arc 共享、零拷贝）， sanitize 推迟到
+                        // `render_aggregate_html` 里一次性完成，避免这里先 `to_owned`
+                        // 成 `String` 再 sanitize 的二道拷贝。
+                        let title = state.get_dict_display_name(file);
+                        let container_class = state.get_dict_container_class(file);
+                        // 词典级自定义 CSS/JS（<dict>.toml 的 css/js 字段，支持内联或
+                        // @file 引用）——注入该词典的 iframe 沙箱文档。内容在
+                        // AppState 建 catalog 时已一次性解析（@file 读盘不落在
+                        // 查询热路径上，见 `get_extra_css/js`）。
+                        let extra_css = state.get_extra_css(dict_id);
+                        let extra_js = state.get_extra_js(dict_id);
+                        Some(AggregateEntryResult {
+                            matched,
+                            section: AggregateSection {
+                                dict_id: dict_id.clone(),
+                                title,
+                                container_class,
+                                extra_css,
+                                extra_js,
+                                body: data,
+                            },
+                        })
+                    }
+                    Ok(None) => None,
+                    Err(e) => {
+                        warn!(
+                            "dict entry query failed for {:?}, word '{}': {}",
+                            file, word, e
+                        );
+                        None
+                    }
                 }
             },
         )
@@ -453,9 +560,13 @@ fn query_aggregate_entries(
     if sections.is_empty() {
         return Err(QueryError::NotFound);
     }
+    Ok(sections)
+}
 
-    let html = render_aggregate_html(word, &sections);
-    Ok((Bytes::from(html), "text/html".to_string()))
+/// 聚合条目收集结果：词条 + 该词典内的最终命中词。
+struct AggregateEntryResult {
+    section: AggregateSection,
+    matched: String,
 }
 
 fn merge_prefix_fallback(

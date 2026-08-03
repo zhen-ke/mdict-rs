@@ -26,6 +26,12 @@
         <symbol id="icon-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l2.5 2"/></symbol>
         <symbol id="icon-filter" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18l-7 8v5l-4 2v-7z"/></symbol>
         <symbol id="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m20 6-11 11-5-5"/></symbol>
+        <symbol id="icon-speaker" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9.5 9.5 0 0 1 0 13"/></symbol>
+        <symbol id="icon-star" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2.5 2.9 5.9 6.5.9-4.7 4.6 1.1 6.5-5.8-3.1-5.8 3.1 1.1-6.5L2.6 9.3l6.5-.9z"/></symbol>
+        <symbol id="icon-star-filled" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2.5 2.9 5.9 6.5.9-4.7 4.6 1.1 6.5-5.8-3.1-5.8 3.1 1.1-6.5L2.6 9.3l6.5-.9z"/></symbol>
+        <symbol id="icon-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.03-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.56-1.03 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.01a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.01a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.56 1.03z"/></symbol>
+        <symbol id="icon-bookmark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4.5L5 21V4a1 1 0 0 1 1-1z"/></symbol>
+        <symbol id="icon-volume" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/></symbol>
     </svg>
 
     <div class="container">
@@ -54,11 +60,58 @@
                 <button id="lucky-btn" class="search-btn">查询</button>
                 <ul id="suggestions"></ul>
             </div>
+            <div class="search-toolbar">
+                <button id="fav-btn" class="toolbar-btn" title="生词本" style="display:none;"><svg class="icon"><use href="#icon-bookmark"/></svg><span id="fav-count" class="toolbar-badge" style="display:none;"></span></button>
+                <button id="settings-btn" class="toolbar-btn" title="设置"><svg class="icon"><use href="#icon-settings"/></svg></button>
+                <div id="fav-dropdown" class="toolbar-dropdown" style="display:none;">
+                    <div class="toolbar-dropdown-head">
+                        <span><svg class="icon"><use href="#icon-bookmark"/></svg> 生词本</span>
+                        <button id="clear-favs" class="clear-history-btn">清空</button>
+                    </div>
+                    <ul id="fav-list"></ul>
+                </div>
+                <div id="settings-panel" class="settings-panel" style="display:none;">
+                    <div class="settings-head"><span><svg class="icon"><use href="#icon-settings"/></svg> 设置</span></div>
+                    <div class="settings-row">
+                        <span class="settings-label">字号</span>
+                        <div class="settings-fontsize">
+                            <button id="font-minus" class="settings-btn" title="缩小字号">A−</button>
+                            <span id="font-size-val" class="settings-val">15</span>
+                            <button id="font-plus" class="settings-btn" title="放大字号">A+</button>
+                        </div>
+                    </div>
+                    <div class="settings-row">
+                        <span class="settings-label">主题</span>
+                        <div class="settings-theme" id="theme-group">
+                            <button class="settings-seg" data-theme-opt="dark">深色</button>
+                            <button class="settings-seg" data-theme-opt="light">浅色</button>
+                            <button class="settings-seg" data-theme-opt="auto">跟随系统</button>
+                        </div>
+                    </div>
+                    <div class="settings-row">
+                        <span class="settings-label">自动发音</span>
+                        <label class="settings-check">
+                            <input type="checkbox" id="auto-pronounce"/>
+                            <span>查询后自动朗读</span>
+                        </label>
+                    </div>
+                    <div class="settings-row">
+                        <span class="settings-label">默认展开</span>
+                        <div class="settings-theme" id="expand-group">
+                            <button class="settings-seg" data-expand-opt="first">仅首本</button>
+                            <button class="settings-seg" data-expand-opt="all">全部</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
             <p class="hint">按 <kbd>Enter</kbd> 快速查询 · <kbd>Ctrl+L</kbd> 清空</p>
         </div>
 
+        <div id="form-banner" class="form-banner" style="display:none;"></div>
+
         <div class="result-card">
             <button id="share-btn" class="share-btn" title="复制分享链接" style="display: none;"><svg class="icon"><use href="#icon-link"/></svg> 分享</button>
+            <div id="headword-bar" class="headword-bar" style="display:none;"></div>
             <div id="mdx-resp">
                 <div class="empty-state">
                     <div class="empty-state-icon"><svg class="icon"><use href="#icon-search"/></svg></div>

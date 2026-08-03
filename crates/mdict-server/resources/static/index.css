@@ -660,6 +660,472 @@ kbd {
 }
 
 /* =============================================
+   Search Toolbar (收藏 / 设置 入口)
+   ============================================= */
+.search-toolbar {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 8px;
+	margin-top: 8px;
+	position: relative;
+	min-height: 28px;
+}
+
+.toolbar-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	background: transparent;
+	border: 1px solid var(--border);
+	color: var(--text-muted);
+	border-radius: 999px;
+	padding: 5px 12px;
+	font-size: 0.8rem;
+	cursor: pointer;
+	transition: all 0.15s;
+	position: relative;
+	font-family: inherit;
+}
+
+.toolbar-btn:hover {
+	border-color: var(--primary);
+	color: var(--primary);
+	background: var(--primary-light);
+}
+
+.toolbar-btn .icon {
+	width: 15px;
+	height: 15px;
+}
+
+.toolbar-badge {
+	position: absolute;
+	top: -6px;
+	right: -6px;
+	background: var(--primary);
+	color: #fff;
+	font-size: 0.66rem;
+	font-weight: 700;
+	line-height: 1;
+	padding: 3px 5px;
+	border-radius: 999px;
+	pointer-events: none;
+}
+
+.toolbar-dropdown {
+	position: absolute;
+	top: calc(100% + 6px);
+	right: 0;
+	width: 240px;
+	background: var(--bg-input);
+	border: 1px solid var(--border);
+	border-radius: 12px;
+	box-shadow: var(--shadow-lg);
+	z-index: 1001;
+	overflow: hidden;
+}
+
+.toolbar-dropdown-head {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	padding: 10px 14px;
+	border-bottom: 1px solid var(--border);
+	font-size: 0.85rem;
+	color: var(--text-muted);
+}
+
+.toolbar-dropdown-head .icon {
+	width: 14px;
+	height: 14px;
+	vertical-align: -2px;
+}
+
+#fav-list {
+	list-style: none;
+	margin: 0;
+	padding: 6px 0;
+	max-height: 260px;
+	overflow-y: auto;
+}
+
+#fav-list li {
+	padding: 9px 16px;
+	cursor: pointer;
+	font-size: 0.9rem;
+	color: var(--text);
+	transition: background 0.15s;
+	border-left: 3px solid transparent;
+}
+
+#fav-list li:hover {
+	background: rgba(99, 102, 241, 0.15);
+	border-left-color: var(--accent);
+	color: var(--accent);
+}
+
+#fav-list li.fav-empty {
+	cursor: default;
+	color: var(--text-dim);
+	font-size: 0.82rem;
+	text-align: center;
+}
+
+/* =============================================
+   Settings Panel
+   ============================================= */
+.settings-panel {
+	position: absolute;
+	top: calc(100% + 6px);
+	right: 0;
+	width: 280px;
+	background: var(--bg-input);
+	border: 1px solid var(--border);
+	border-radius: 12px;
+	box-shadow: var(--shadow-lg);
+	z-index: 1001;
+	padding: 0 16px 12px;
+}
+
+.settings-head {
+	padding: 11px 0;
+	border-bottom: 1px solid var(--border);
+	font-size: 0.85rem;
+	font-weight: 600;
+	color: var(--text-muted);
+	margin-bottom: 6px;
+}
+
+.settings-head .icon {
+	width: 14px;
+	height: 14px;
+	vertical-align: -2px;
+}
+
+.settings-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	padding: 9px 0;
+	font-size: 0.85rem;
+	color: var(--text);
+}
+
+.settings-label {
+	color: var(--text-muted);
+	flex-shrink: 0;
+}
+
+.settings-fontsize {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.settings-btn {
+	background: transparent;
+	border: 1px solid var(--border);
+	color: var(--text-muted);
+	border-radius: 8px;
+	width: 34px;
+	height: 28px;
+	font-size: 0.9rem;
+	cursor: pointer;
+	transition: all 0.15s;
+	font-family: inherit;
+}
+
+.settings-btn:hover {
+	border-color: var(--primary);
+	color: var(--primary);
+}
+
+.settings-val {
+	min-width: 28px;
+	text-align: center;
+	color: var(--text);
+	font-family: var(--font-mono);
+	font-size: 0.85rem;
+}
+
+.settings-theme {
+	display: flex;
+	gap: 4px;
+}
+
+.settings-seg {
+	background: transparent;
+	border: 1px solid var(--border);
+	color: var(--text-muted);
+	border-radius: 8px;
+	padding: 4px 10px;
+	font-size: 0.78rem;
+	cursor: pointer;
+	transition: all 0.15s;
+	font-family: inherit;
+}
+
+.settings-seg:hover {
+	border-color: var(--primary);
+	color: var(--primary);
+}
+
+.settings-seg.active {
+	background: var(--primary-light);
+	border-color: var(--primary);
+	color: #c7d2fe;
+}
+
+.settings-check {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	color: var(--text);
+	cursor: pointer;
+	font-size: 0.82rem;
+}
+
+.settings-check input {
+	accent-color: var(--primary);
+}
+
+/* =============================================
+   词头条 (Headword Bar)
+   ============================================= */
+.headword-bar {
+	background: var(--bg-card);
+	border: 1px solid var(--border);
+	border-radius: 14px;
+	padding: 14px 18px;
+	margin-bottom: 16px;
+	box-shadow: var(--shadow-sm);
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.hw-main {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 10px;
+}
+
+.hw-star {
+	background: transparent;
+	border: 1px solid var(--border);
+	color: var(--text-dim);
+	width: 34px;
+	height: 34px;
+	border-radius: 50%;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	transition: all 0.15s;
+	flex-shrink: 0;
+}
+
+.hw-star .icon {
+	width: 17px;
+	height: 17px;
+}
+
+.hw-star:hover {
+	border-color: var(--accent-amber);
+	color: var(--accent-amber);
+}
+
+.hw-star.active {
+	border-color: var(--accent-amber);
+	color: var(--accent-amber);
+	background: rgba(245, 158, 11, 0.12);
+}
+
+.hw-word {
+	font-family: var(--font-headword);
+	font-size: 1.9rem;
+	font-weight: 700;
+	letter-spacing: -0.02em;
+	color: var(--text);
+	line-height: 1.15;
+}
+
+.hw-phonetics {
+	font-family: var(--font-phonetic);
+	color: var(--accent-sky);
+	font-size: 1.02rem;
+	letter-spacing: 0.02em;
+}
+
+.hw-audio {
+	background: var(--primary-light);
+	border: 1px solid var(--primary-border);
+	color: #c7d2fe;
+	width: 34px;
+	height: 34px;
+	border-radius: 50%;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	transition: all 0.15s;
+	flex-shrink: 0;
+}
+
+.hw-audio .icon {
+	width: 17px;
+	height: 17px;
+}
+
+.hw-audio:hover {
+	background: rgba(99, 102, 241, 0.25);
+	transform: translateY(-1px);
+}
+
+.hw-sub {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 10px;
+	font-size: 0.8rem;
+	color: var(--text-dim);
+}
+
+.hw-count {
+	padding: 2px 9px;
+	border-radius: 999px;
+	border: 1px solid var(--primary-border);
+	background: var(--primary-light);
+	color: #c7d2fe;
+	font-weight: 600;
+	font-size: 0.76rem;
+}
+
+.hw-form-hint {
+	color: var(--text-dim);
+}
+
+/* =============================================
+   词形变化提示条 (Form Banner)
+   ============================================= */
+.form-banner {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 8px;
+	background: rgba(245, 158, 11, 0.1);
+	border: 1px solid rgba(245, 158, 11, 0.35);
+	color: #fcd34d;
+	border-radius: 10px;
+	padding: 9px 14px;
+	font-size: 0.88rem;
+	margin-bottom: 14px;
+}
+
+.form-banner-link {
+	background: rgba(245, 158, 11, 0.15);
+	border: 1px solid rgba(245, 158, 11, 0.4);
+	color: #fcd34d;
+	border-radius: 999px;
+	padding: 3px 12px;
+	font-size: 0.8rem;
+	font-weight: 600;
+	cursor: pointer;
+	transition: all 0.15s;
+	font-family: inherit;
+}
+
+.form-banner-link:hover {
+	background: rgba(245, 158, 11, 0.28);
+}
+
+/* =============================================
+   Entry Tabs (词典内多词条导航)
+   ============================================= */
+.mdict-entry-tabs {
+	display: flex;
+	flex-wrap: nowrap;
+	overflow-x: auto;
+	gap: 6px;
+	padding: 10px 14px 0;
+	border-bottom: 1px solid var(--border);
+	scrollbar-width: thin;
+}
+
+.mdict-entry-tab {
+	background: transparent;
+	border: 1px solid var(--border);
+	border-bottom: none;
+	color: var(--text-muted);
+	border-radius: 10px 10px 0 0;
+	padding: 6px 14px;
+	font-size: 0.82rem;
+	cursor: pointer;
+	transition: all 0.15s;
+	white-space: nowrap;
+	font-family: inherit;
+}
+
+.mdict-entry-tab:hover {
+	color: var(--primary);
+	border-color: var(--primary);
+}
+
+.mdict-entry-tab.active {
+	background: var(--primary-light);
+	border-color: var(--primary);
+	color: #c7d2fe;
+	font-weight: 600;
+}
+
+/* =============================================
+   义项导航 (Sense Nav)
+   ============================================= */
+.mdict-sense-nav {
+	display: flex;
+	flex-wrap: nowrap;
+	overflow-x: auto;
+	align-items: center;
+	gap: 4px;
+	padding: 8px 14px;
+	border-bottom: 1px solid var(--border);
+	background: rgba(15, 23, 42, 0.35);
+	scrollbar-width: thin;
+}
+
+.sense-nav-label {
+	flex-shrink: 0;
+	font-size: 0.76rem;
+	color: var(--text-dim);
+	margin-right: 4px;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+}
+
+.sense-nav-item {
+	background: transparent;
+	border: 1px solid var(--border);
+	color: var(--text-muted);
+	min-width: 26px;
+	height: 24px;
+	border-radius: 6px;
+	font-size: 0.74rem;
+	cursor: pointer;
+	transition: all 0.12s;
+	font-family: var(--font-mono);
+	flex-shrink: 0;
+}
+
+.sense-nav-item:hover {
+	border-color: var(--primary);
+	color: var(--primary);
+	background: var(--primary-light);
+}
+
+/* =============================================
    Dictionary Navigation Bar
    ============================================= */
 #mdx-resp .mdict-dict-nav {
@@ -886,6 +1352,61 @@ footer span {
 		position: absolute;
 		top: 12px;
 		right: 12px;
+	}
+
+	/* 移动端：搜索工具栏与提示紧凑化 */
+	.search-toolbar {
+		margin-top: 6px;
+	}
+
+	.toolbar-btn {
+		padding: 8px 12px;
+	}
+
+	/* 词头条：词头与音标可换行，按钮触控目标 ≥ 40px */
+	.headword-bar {
+		padding: 12px 14px;
+	}
+
+	.hw-word {
+		font-size: 1.6rem;
+	}
+
+	.hw-star,
+	.hw-audio {
+		width: 40px;
+		height: 40px;
+	}
+
+	.hw-star .icon,
+	.hw-audio .icon {
+		width: 20px;
+		height: 20px;
+	}
+
+	/* 设置面板与收藏下拉：移动端全宽贴近搜索栏 */
+	.settings-panel,
+	.toolbar-dropdown {
+		left: 0;
+		right: 0;
+		width: auto;
+		max-width: none;
+	}
+
+	/* 义项导航 / entry tab 横向滚动条在触屏上更易用 */
+	.mdict-sense-nav,
+	.mdict-entry-tabs {
+		-webkit-overflow-scrolling: touch;
+	}
+
+	.sense-nav-item {
+		min-width: 32px;
+		height: 32px;
+		font-size: 0.82rem;
+	}
+
+	#mdx-resp .mdict-dict-frame {
+		max-height: 100000px;
 	}
 }
 
@@ -1327,4 +1848,211 @@ footer span {
 	background: rgba(99, 102, 241, 0.15);
 	border-left-color: var(--accent);
 	color: var(--accent);
+}
+
+/* =============================================
+   Light Theme (浅色主题覆盖层)
+   =============================================
+   深色为默认主题；`<html data-theme="light">` 时本层覆盖生效。
+   主要思路：全局变量换肤 + 对少量硬编码深色表面做等选择器覆盖，
+   避免改动深色主题本身的规则。 */
+:root[data-theme="light"] {
+	--bg: #f3f5f9;
+	--bg-card: #ffffff;
+	--bg-input: #ffffff;
+	--text: #1c2433;
+	--text-muted: #56647a;
+	--text-dim: #8b97ab;
+	--border: rgba(28, 36, 51, 0.12);
+	--border-hover: rgba(99, 102, 241, 0.5);
+	--primary-light: rgba(99, 102, 241, 0.1);
+	--primary-border: rgba(99, 102, 241, 0.35);
+	--shadow-sm: 0 2px 8px rgba(30, 41, 59, 0.07);
+	--shadow-md: 0 6px 20px rgba(30, 41, 59, 0.09);
+	--shadow-lg: 0 12px 32px rgba(30, 41, 59, 0.13);
+}
+
+:root[data-theme="light"] h1 {
+	background: linear-gradient(135deg, #1c2433 30%, #6366f1 100%);
+	-webkit-background-clip: text;
+	background-clip: text;
+}
+
+:root[data-theme="light"] .search-container {
+	background: rgba(243, 245, 249, 0.9);
+}
+
+:root[data-theme="light"] .logo-icon {
+	box-shadow: 0 4px 16px rgba(99, 102, 241, 0.25);
+}
+
+:root[data-theme="light"] #suggestions {
+	background: rgba(255, 255, 255, 0.97);
+	border-color: rgba(28, 36, 51, 0.16);
+}
+
+:root[data-theme="light"] #suggestions li {
+	color: #334155;
+}
+
+:root[data-theme="light"] #suggestions li .sug-rest {
+	color: #334155;
+}
+
+:root[data-theme="light"] #suggestions li .sug-match {
+	color: #4f46e5;
+}
+
+:root[data-theme="light"] #suggestions li:hover,
+:root[data-theme="light"] #suggestions li.selected {
+	background: linear-gradient(
+		90deg,
+		rgba(99, 102, 241, 0.14),
+		rgba(99, 102, 241, 0.03)
+	);
+}
+
+:root[data-theme="light"] #suggestions li.sug-footer {
+	background: rgba(243, 245, 249, 0.8);
+}
+
+:root[data-theme="light"] #mdx-resp .mdict-aggregate-meta {
+	background: rgba(255, 255, 255, 0.94);
+}
+
+:root[data-theme="light"] #mdx-resp .mdict-dict-section {
+	background: #ffffff;
+}
+
+:root[data-theme="light"] #mdx-resp .mdict-dict-head {
+	background: linear-gradient(135deg, #f1f4f9, #ffffff);
+}
+
+:root[data-theme="light"] #mdx-resp .mdict-dict-head:hover {
+	background: linear-gradient(135deg, #e8edf5, #f6f8fb);
+}
+
+:root[data-theme="light"] #mdx-resp .mdict-dict-name {
+	color: #1c2433;
+}
+
+:root[data-theme="light"] #mdx-resp .mdict-dict-index {
+	color: #4f46e5;
+	background: rgba(99, 102, 241, 0.12);
+}
+
+:root[data-theme="light"] #mdx-resp .mdict-dict-toggle {
+	color: #8b97ab;
+}
+
+:root[data-theme="light"] .mdict-entry-tabs,
+:root[data-theme="light"] .mdict-sense-nav {
+	border-bottom-color: rgba(28, 36, 51, 0.1);
+}
+
+:root[data-theme="light"] .mdict-sense-nav {
+	background: rgba(241, 244, 249, 0.7);
+}
+
+:root[data-theme="light"] .mdict-entry-tab.active,
+:root[data-theme="light"] .settings-seg.active {
+	color: #4f46e5;
+}
+
+:root[data-theme="light"] .settings-panel,
+:root[data-theme="light"] .toolbar-dropdown,
+:root[data-theme="light"] .dict-filter-body,
+:root[data-theme="light"] .history-dropdown {
+	background: #ffffff;
+}
+
+:root[data-theme="light"] #history-list li,
+:root[data-theme="light"] #fav-list li {
+	color: #334155;
+}
+
+:root[data-theme="light"] kbd {
+	background: #eef1f6;
+	color: #56647a;
+}
+
+:root[data-theme="light"] .hw-audio,
+:root[data-theme="light"] .hw-count,
+:root[data-theme="light"] .mdict-agg-hit {
+	color: #4f46e5;
+}
+
+/* 词典正文的深色硬编码色在浅色下的覆盖（作用域限定在父页聚合层） */
+:root[data-theme="light"] #mdx-resp .entry {
+	color: #2b3648;
+}
+
+:root[data-theme="light"] #mdx-resp .def {
+	color: #1c2433;
+}
+
+:root[data-theme="light"] #mdx-resp .example {
+	color: #475569;
+}
+
+:root[data-theme="light"] #mdx-resp expen,
+:root[data-theme="light"] #mdx-resp .expen,
+:root[data-theme="light"] #mdx-resp .EXPEN,
+:root[data-theme="light"] #mdx-resp .exa {
+	color: #1e293b;
+}
+
+:root[data-theme="light"] #mdx-resp .explan,
+:root[data-theme="light"] #mdx-resp .EXPLAN,
+:root[data-theme="light"] #mdx-resp .gloss,
+:root[data-theme="light"] #mdx-resp .GLOSS {
+	color: #64748b;
+}
+
+:root[data-theme="light"] #mdx-resp .collobox,
+:root[data-theme="light"] #mdx-resp .thesbox,
+:root[data-theme="light"] #mdx-resp .usagebox,
+:root[data-theme="light"] #mdx-resp .grambox,
+:root[data-theme="light"] #mdx-resp .f2nbox {
+	background: rgba(30, 41, 59, 0.04);
+	border-color: rgba(28, 36, 51, 0.12);
+}
+
+:root[data-theme="light"] #mdx-resp .collobox .heading,
+:root[data-theme="light"] #mdx-resp .thesbox .heading,
+:root[data-theme="light"] #mdx-resp .usagebox .heading,
+:root[data-theme="light"] #mdx-resp .grambox .heading,
+:root[data-theme="light"] #mdx-resp .f2nbox .heading {
+	background: rgba(30, 41, 59, 0.07);
+	color: #1c2433;
+}
+
+:root[data-theme="light"] #mdx-resp a {
+	color: #4f46e5;
+}
+
+:root[data-theme="light"] #mdx-resp a:hover {
+	color: #3730a3;
+}
+
+:root[data-theme="light"] #mdx-resp .mdict-query-word {
+	color: #4f46e5 !important;
+	background: rgba(99, 102, 241, 0.1) !important;
+	border-color: rgba(99, 102, 241, 0.3) !important;
+}
+
+:root[data-theme="light"] #mdx-resp img[src*="spkr"] {
+	filter: brightness(0.85);
+}
+
+:root[data-theme="light"] .form-banner {
+	background: rgba(245, 158, 11, 0.08);
+	color: #b45309;
+	border-color: rgba(245, 158, 11, 0.4);
+}
+
+:root[data-theme="light"] .form-banner-link {
+	background: rgba(245, 158, 11, 0.12);
+	color: #b45309;
+	border-color: rgba(245, 158, 11, 0.45);
 }

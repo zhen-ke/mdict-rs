@@ -4,7 +4,10 @@ mod service;
 mod specific;
 
 pub use error::QueryError;
-pub use service::{DictFilter, fuzzy_suggest, query, query_aggregate, query_with_trace, suggest};
+pub use service::{
+    DictFilter, fuzzy_suggest, query, query_aggregate,
+    query_aggregate_json, query_with_trace, suggest,
+};
 pub use specific::{query_specific_entry, query_specific_resource};
 
 pub(crate) use mdict_core::normalize::{canonical_normalize, entry_query_candidates};

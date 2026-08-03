@@ -31,6 +31,20 @@ pub fn query_specific_entry(
     word: &str,
     dict_id: &str,
 ) -> Result<Option<(Bytes, String)>, QueryError> {
+    query_specific_entry_with_final(state, file, word, dict_id)
+        .map(|opt| opt.map(|(data, ctype, _final)| (data, ctype)))
+}
+
+/// 同 [`query_specific_entry`]，但额外返回词形归一/重定向后的**最终命中词**。
+///
+/// 例：查 "went" 经 @@@LINK= 重定向到 "go"，第三个返回值是 "go"。前端据此
+/// 渲染"显示的是 go 的词形变化"提示条。
+pub fn query_specific_entry_with_final(
+    state: &AppState,
+    file: &Path,
+    word: &str,
+    dict_id: &str,
+) -> Result<Option<(Bytes, String, String)>, QueryError> {
     query_specific_entry_internal(state, file, word, dict_id, 0)
 }
 
@@ -40,7 +54,7 @@ fn query_specific_entry_internal(
     word: &str,
     dict_id: &str,
     depth: u8,
-) -> Result<Option<(Bytes, String)>, QueryError> {
+) -> Result<Option<(Bytes, String, String)>, QueryError> {
     if depth > MAX_REDIRECT_DEPTH {
         return Err(QueryError::TooManyRedirects);
     }
@@ -71,7 +85,7 @@ fn query_specific_entry_internal(
             }
             EntryCandidateLookup::Hit(data) => {
                 let data = rewrite_entry_html_record(data, dict_id);
-                return Ok(Some((data, "text/html".to_string())));
+                return Ok(Some((data, "text/html".to_string(), word.to_string())));
             }
         }
     }
@@ -94,7 +108,7 @@ fn query_specific_entry_internal(
             }
             EntryCandidateLookup::Hit(data) => {
                 let data = rewrite_entry_html_record(data, dict_id);
-                return Ok(Some((data, "text/html".to_string())));
+                return Ok(Some((data, "text/html".to_string(), word.to_string())));
             }
         }
     }

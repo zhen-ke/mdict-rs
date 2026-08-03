@@ -21,6 +21,7 @@ lru = "0.12"
 rayon = "1"
 regex = "1"
 percent-encoding = "2"
+serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tracing = "0.1"
 
