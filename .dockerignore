@@ -1,0 +1,13 @@
+# 构建上下文排除项：target 有 5.8GB，mdict/ 有 1.4GB 词典数据，
+# 不排除的话每次 docker build 都要把这些打包发送给守护进程。
+target/
+.git/
+.github/
+.commandcode/
+.DS_Store
+mdict/
+.cargo/
+deploy.sh
+*.md
+Dockerfile
+.dockerignore
