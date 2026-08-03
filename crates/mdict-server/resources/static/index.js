@@ -1215,7 +1215,12 @@ $(document).ready(() => {
 		$("#word").val(wordFromUrl);
 		queryMdxFromNavigation(wordFromUrl);
 	} else {
+		// 首访自动聚焦不弹历史下拉（用户主动点击输入框时才显示）
+		suppressHistoryOnFocus = true;
 		$("#word").focus();
+		setTimeout(() => {
+			suppressHistoryOnFocus = false;
+		}, 400);
 	}
 });
 
@@ -1284,8 +1289,13 @@ function hideHistoryDropdown() {
 	$("#history-dropdown").hide();
 }
 
+// 首访自动聚焦的抑制标志：页面加载时程序 focus 不弹历史，
+// 用户主动点击输入框时才显示历史下拉。
+let suppressHistoryOnFocus = false;
+
 // 输入框获得焦点且为空时显示历史
 $(document).on("focus", "#word", function () {
+	if (suppressHistoryOnFocus) return;
 	if ($(this).val().trim() === "") {
 		showHistoryDropdown();
 	}
@@ -1593,9 +1603,7 @@ function validInput(word) {
 // =============================================
 // 联想词功能
 // =============================================
-// 联想词功能
-// =============================================
-function showSuggestions(suggestions) {
+function showSuggestions(suggestions, groupHeader) {
 	const $list = $("#suggestions");
 	$list.empty();
 	hideHistoryDropdown();
@@ -1603,6 +1611,10 @@ function showSuggestions(suggestions) {
 	if (!suggestions || suggestions.length === 0) {
 		$list.hide();
 		return;
+	}
+
+	if (groupHeader) {
+		$list.append(`<li class="sug-group">${groupHeader}</li>`);
 	}
 
 	const query = $("#word").val().trim().toLowerCase();
@@ -1682,9 +1694,9 @@ function scrollToAnchor(anchorId) {
 	return false;
 }
 
-// 监听输入变化
-$(document).on("input", "#word", function () {
-	const query = $(this).val().trim();
+// 输入变化处理（防抖 + 建议 + 拼写校正兜底）
+function handleSearchInput() {
+	const query = $("#word").val().trim();
 	hideHistoryDropdown();
 
 	if (query.length > 0) {
@@ -1717,13 +1729,61 @@ $(document).on("input", "#word", function () {
 			data: sugData,
 			dataType: "json",
 			success: (data) => {
-				showSuggestions(data);
+				// 竞态保护：响应返回时输入已变，丢弃旧结果。
+				if ($("#word").val().trim().toLowerCase() !== query.toLowerCase()) {
+					return;
+				}
+				if (data && data.length > 0) {
+					showSuggestions(data);
+				} else {
+					// 前缀无命中 → 拼写校正（did you mean），专业词典
+					// 在输入阶段就给出近邻词，不必等查询完。
+					fetchFuzzySuggest(query);
+				}
 			},
 			error: () => {
 				hideSuggestions();
 			},
 		});
 	}, CONFIG.DEBOUNCE_MS);
+}
+
+// 编辑距离近邻建议（/suggest/fuzzy），以分组头「拼写校正」展示。
+function fetchFuzzySuggest(query) {
+	$.ajax({
+		url: "./suggest/fuzzy",
+		type: "GET",
+		data: { q: query },
+		dataType: "json",
+		success: (data) => {
+			if ($("#word").val().trim().toLowerCase() !== query.toLowerCase()) {
+				return;
+			}
+			if (data && data.length > 0) {
+				showSuggestions(data, "拼写校正");
+			} else {
+				hideSuggestions();
+			}
+		},
+		error: () => {
+			hideSuggestions();
+		},
+	});
+}
+
+// IME 组合输入保护：中文/日文输入法打拼音/假名期间跳过 input 建议触发，
+// 避免候选框随组合过程闪烁；组合结束后手动补一次建议刷新。
+let isComposing = false;
+$(document).on("compositionstart", "#word", () => {
+	isComposing = true;
+});
+$(document).on("compositionend", "#word", () => {
+	isComposing = false;
+	handleSearchInput();
+});
+$(document).on("input", "#word", function () {
+	if (isComposing) return;
+	handleSearchInput();
 });
 
 // 清空按钮点击
@@ -1769,7 +1829,8 @@ $(document).on("keydown", "#word", (e) => {
 	const isVisible = $("#suggestions").is(":visible");
 
 	if (e.keyCode === 13) {
-		// Enter
+		// Enter（IME 组合确认候选时 keyCode 为 229 / isComposing，跳过）
+		if (isComposing) return;
 		e.preventDefault();
 		hideHistoryDropdown();
 		if (isVisible && selectedIndex >= 0 && selectedIndex < $items.length) {
@@ -1798,9 +1859,17 @@ $(document).on("keydown", "#word", (e) => {
 			selectSuggestion(prev);
 		}
 	} else if (e.keyCode === 27) {
-		// Escape
-		hideSuggestions();
-		hideHistoryDropdown();
+		// Escape 两级语义（macOS 词典行为）：
+		// 1) 有关联下拉 → 关闭；
+		// 2) 输入被改动 → 还原为上次查询词。
+		const sugVisible = $("#suggestions").is(":visible");
+		const histVisible = $("#history-dropdown").is(":visible");
+		if (sugVisible || histVisible) {
+			hideSuggestions();
+			hideHistoryDropdown();
+		} else if (currentQuery && $("#word").val().trim() !== currentQuery) {
+			$("#word").val(currentQuery);
+		}
 	}
 });
 

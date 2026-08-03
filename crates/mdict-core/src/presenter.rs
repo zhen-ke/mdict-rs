@@ -302,6 +302,19 @@ fn strip_tags(input: &str) -> String {
     cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// 判断音频路径是否为美音（路径段含 ame/us/american，如 LDOCE 的
+/// `hwd/ame/5/go1.mp3`；`exa/bre`、`hwd/uk` 等均不算）。
+fn is_ame_audio_path(path: &str) -> bool {
+    path.split('/').any(|seg| {
+        let seg = seg.to_ascii_lowercase();
+        seg == "ame"
+            || seg == "us"
+            || seg == "american"
+            || seg.starts_with("ame_")
+            || seg.starts_with("us_")
+    })
+}
+
 /// 从词典条目 HTML 中提取结构化元数据（词头 / 音标 / 发音 / entries / 义项数）。
 ///
 /// 用启发式正则跨词典通用提取，不依赖某本词典的具体结构：
@@ -395,12 +408,24 @@ pub fn extract_section_meta(html: &str, dict_id: &str) -> SectionMeta {
         }
     }
 
-    // 发音
-    if let Some(caps) = sound_re.captures(html) {
+    // 发音：优先美音（路径含 ame/us/american 等段），否则回退第一个。
+    // LDOCE 同词头有 hwd/bre（英）与 hwd/ame（美）两套音频，默认取美音。
+    let mut first_audio: Option<String> = None;
+    let mut ame_audio: Option<String> = None;
+    for caps in sound_re.captures_iter(html) {
         let path = caps[1].trim();
-        if !path.is_empty() {
-            meta.audio = Some(format!("/dict/{}/audio/{}", dict_id, path));
+        if path.is_empty() {
+            continue;
         }
+        if first_audio.is_none() {
+            first_audio = Some(path.to_string());
+        }
+        if ame_audio.is_none() && is_ame_audio_path(path) {
+            ame_audio = Some(path.to_string());
+        }
+    }
+    if let Some(path) = ame_audio.or(first_audio) {
+        meta.audio = Some(format!("/dict/{}/audio/{}", dict_id, path));
     }
 
     // entries：三层提取，越靠前标签越准确——
@@ -1186,5 +1211,31 @@ mod tests {
         let meta = extract_section_meta(html, "d1");
         assert_eq!(meta.entries.len(), 1);
         assert_eq!(meta.entries[0].id, "X_go_1");
+    }
+
+    #[test]
+    fn meta_prefers_ame_audio_over_bre() {
+        // LDOCE 风格：英音在前、美音在后，应选美音。
+        let html = concat!(
+            r#"<a onclick="play('sound://hwd/bre/1/go_n0205.mp3')">🔊</a>"#,
+            r#"<a onclick="play('sound://hwd/ame/5/go1.mp3')">🔊</a>"#,
+            r#"<a onclick="play('sound://exa/bre/0/ldoce5_exa000665.mp3')">🔊</a>"#,
+        );
+        let meta = extract_section_meta(html, "ldoce");
+        assert_eq!(
+            meta.audio.as_deref(),
+            Some("/dict/ldoce/audio/hwd/ame/5/go1.mp3")
+        );
+    }
+
+    #[test]
+    fn meta_falls_back_to_first_audio_when_no_ame() {
+        // 无美音时回退第一个音频（如仅英音 uk）。
+        let html = r#"<a onclick="play('sound://hwd/uk/go.mp3')">🔊</a>"#;
+        let meta = extract_section_meta(html, "ldoce");
+        assert_eq!(
+            meta.audio.as_deref(),
+            Some("/dict/ldoce/audio/hwd/uk/go.mp3")
+        );
     }
 }

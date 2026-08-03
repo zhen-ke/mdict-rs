@@ -218,12 +218,41 @@ pub fn suggest(
     }
 
     let mut candidates: Vec<(String, i32)> = scores.into_iter().collect();
-    candidates.sort_by(|a, b| match b.1.cmp(&a.1) {
-        std::cmp::Ordering::Equal => match a.0.len().cmp(&b.0.len()) {
-            std::cmp::Ordering::Equal => a.0.to_lowercase().cmp(&b.0.to_lowercase()),
+    // 精确命中（含大小写）硬置顶；其次规范化等价（café/Cafe、变音、标点折叠）
+    // 置顶——专业词典输入前缀时，完全一致/词形折叠一致的词条必须排最前，
+    // 不能被 bm25 分数噪声覆盖（bm25_bonus 可高达数千，盖过 1000 的精确分）。
+    let prefix_canon = canonical_normalize(trimmed);
+    candidates.sort_by(|a, b| {
+        let a_exact = a.0.to_lowercase() == prefix_lower;
+        let b_exact = b.0.to_lowercase() == prefix_lower;
+        match (a_exact, b_exact) {
+            (true, false) => return std::cmp::Ordering::Less,
+            (false, true) => return std::cmp::Ordering::Greater,
+            (true, true) => {
+                return a
+                    .0
+                    .len()
+                    .cmp(&b.0.len())
+                    .then(a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+            }
+            (false, false) => {}
+        }
+        if !prefix_canon.is_empty() {
+            let a_canon = canonical_normalize(&a.0) == prefix_canon;
+            let b_canon = canonical_normalize(&b.0) == prefix_canon;
+            match (a_canon, b_canon) {
+                (true, false) => return std::cmp::Ordering::Less,
+                (false, true) => return std::cmp::Ordering::Greater,
+                _ => {}
+            }
+        }
+        match b.1.cmp(&a.1) {
+            std::cmp::Ordering::Equal => match a.0.len().cmp(&b.0.len()) {
+                std::cmp::Ordering::Equal => a.0.to_lowercase().cmp(&b.0.to_lowercase()),
+                other => other,
+            },
             other => other,
-        },
-        other => other,
+        }
     });
 
     Ok(candidates
